@@ -128,6 +128,8 @@ class ByteRoverMemoryProvider(MemoryProvider):
         self._auto_extract = _coerce_bool(self._config.get("auto_extract"), True)
         self._cwd, self._session_id, self._turn_count = "", "", 0
         self._sync_thread: Optional[threading.Thread] = None
+        self._query_timeout = int(self._config.get("query_timeout", _QUERY_TIMEOUT))
+        self._curate_timeout = int(self._config.get("curate_timeout", _CURATE_TIMEOUT))
 
     @property
     def name(self) -> str:
@@ -143,7 +145,38 @@ class ByteRoverMemoryProvider(MemoryProvider):
              "env_var": "BRV_API_KEY", "url": "https://app.byterover.dev"},
             {"key": "auto_extract", "description": "Automatically curate completed turns and compression/memory hooks",
              "default": "true", "choices": ["true", "false"]},
+            {"key": "query_timeout", "description": "Timeout for brv query (seconds)", "default": _QUERY_TIMEOUT},
+            {"key": "curate_timeout", "description": "Timeout for brv curate (seconds)", "default": _CURATE_TIMEOUT},
         ]
+    def save_config(self, values, hermes_home):
+        """Write config to config.yaml under memory.byterover."""
+        from pathlib import Path
+        config_path = Path(hermes_home) / "config.yaml"
+
+        # Cast timeouts to ints if present
+        if "query_timeout" in values:
+            try:
+                values["query_timeout"] = int(values["query_timeout"])
+            except ValueError:
+                pass
+        if "curate_timeout" in values:
+            try:
+                values["curate_timeout"] = int(values["curate_timeout"])
+            except ValueError:
+                pass
+
+        try:
+            import yaml
+            existing = {}
+            if config_path.exists():
+                with open(config_path) as f:
+                    existing = yaml.safe_load(f) or {}
+            existing.setdefault("memory", {})
+            existing["memory"]["byterover"] = values
+            with open(config_path, "w") as f:
+                yaml.dump(existing, f, default_flow_style=False)
+        except Exception:
+            pass
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._cwd, self._session_id, self._turn_count = str(_get_brv_cwd()), session_id, 0
@@ -156,10 +189,10 @@ class ByteRoverMemoryProvider(MemoryProvider):
                 "Use brv_query to search past knowledge, brv_curate to store important facts, brv_status to check state.")
 
     def _query(self, query: str) -> dict:
-        return _run_brv(["query", "--", query.strip()[:5000]], timeout=_QUERY_TIMEOUT, cwd=self._cwd)
+        return _run_brv(["query", "--", query.strip()[:5000]], timeout=self._query_timeout, cwd=self._cwd)
 
     def _curate(self, content: str) -> dict:
-        return _run_brv(["curate", "--", content], timeout=_CURATE_TIMEOUT, cwd=self._cwd)
+        return _run_brv(["curate", "--", content], timeout=self._curate_timeout, cwd=self._cwd)
 
     def _curate_in_background(self, content: str, *, name: str, what: str, on_done: str = "") -> threading.Thread:
         """Spawn a daemon thread that curates ``content``; failures are logged at debug, never raised."""
