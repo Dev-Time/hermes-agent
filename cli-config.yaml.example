@@ -656,6 +656,7 @@ platform_toolsets:
 #     reply_to_mode: "first"  # off | first | all
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
+#       internal_messages_silent: false  # Set true to send internal text, tool updates, and reasoning silently
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Available toolsets (use these names in platform_toolsets or the toolsets list)

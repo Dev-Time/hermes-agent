@@ -261,6 +261,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._mention_patterns = self._compile_mention_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
+        self._internal_messages_silent: bool = self._coerce_bool_extra("internal_messages_silent", False)
         # Buffer rapid/album photo updates so Telegram image bursts are handled
         # as a single MessageEvent instead of self-interrupting multiple turns.
         self._media_batch_delay_seconds = float(os.getenv("HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS", "0.8"))
@@ -413,6 +414,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if LinkPreviewOptions is not None:
             return {"link_preview_options": LinkPreviewOptions(is_disabled=True)}
         return {"disable_web_page_preview": True}
+
+    def _silent_kwargs(self, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if getattr(self, "_internal_messages_silent", False) and metadata and metadata.get("is_internal"):
+            return {"disable_notification": True}
+        return {}
 
     async def _drain_polling_connections(self) -> None:
         """Reset the httpx connection pool used for getUpdates polling.
@@ -1250,6 +1256,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 reply_to_message_id=reply_to_id,
                                 message_thread_id=effective_thread_id,
                                 **self._link_preview_kwargs(),
+                                **self._silent_kwargs(metadata),
                             )
                         except Exception as md_error:
                             # Markdown parsing failed, try plain text
@@ -1263,6 +1270,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     reply_to_message_id=reply_to_id,
                                     message_thread_id=effective_thread_id,
                                     **self._link_preview_kwargs(),
+                                    **self._silent_kwargs(metadata),
                                 )
                             else:
                                 raise
@@ -2123,6 +2131,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         caption=caption[:1024] if caption else None,
                         reply_to_message_id=int(reply_to) if reply_to else None,
                         message_thread_id=self._message_thread_id_for_send(_voice_thread),
+                        **self._silent_kwargs(metadata),
                     )
                 elif ext in (".mp3", ".m4a"):
                     # Telegram's Bot API sendAudio only accepts MP3 / M4A.
@@ -2133,6 +2142,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         caption=caption[:1024] if caption else None,
                         reply_to_message_id=int(reply_to) if reply_to else None,
                         message_thread_id=self._message_thread_id_for_send(_audio_thread),
+                        **self._silent_kwargs(metadata),
                     )
                 else:
                     # Formats Telegram can't play natively (.wav, .flac, ...)
@@ -2247,6 +2257,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     chat_id=int(chat_id),
                     media=media,
                     message_thread_id=_thread_id,
+                    **self._silent_kwargs(metadata),
                 )
             except Exception as e:
                 logger.warning(
@@ -2290,6 +2301,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     caption=caption[:1024] if caption else None,
                     reply_to_message_id=int(reply_to) if reply_to else None,
                     message_thread_id=self._message_thread_id_for_send(_thread),
+                    **self._silent_kwargs(metadata),
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -2371,6 +2383,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     caption=caption[:1024] if caption else None,
                     reply_to_message_id=int(reply_to) if reply_to else None,
                     message_thread_id=self._message_thread_id_for_send(_thread),
+                    **self._silent_kwargs(metadata),
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -2402,6 +2415,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     caption=caption[:1024] if caption else None,
                     reply_to_message_id=int(reply_to) if reply_to else None,
                     message_thread_id=self._message_thread_id_for_send(_thread),
+                    **self._silent_kwargs(metadata),
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -2438,6 +2452,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 caption=caption[:1024] if caption else None,  # Telegram caption limit
                 reply_to_message_id=int(reply_to) if reply_to else None,
                 message_thread_id=self._message_thread_id_for_send(_photo_thread),
+                **self._silent_kwargs(metadata),
             )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -2461,6 +2476,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     caption=caption[:1024] if caption else None,
                     reply_to_message_id=int(reply_to) if reply_to else None,
                     message_thread_id=self._message_thread_id_for_send(_photo_thread),
+                    **self._silent_kwargs(metadata),
                 )
                 return SendResult(success=True, message_id=str(msg.message_id))
             except Exception as e2:
@@ -2493,6 +2509,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 caption=caption[:1024] if caption else None,
                 reply_to_message_id=int(reply_to) if reply_to else None,
                 message_thread_id=self._message_thread_id_for_send(_anim_thread),
+                **self._silent_kwargs(metadata),
             )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:

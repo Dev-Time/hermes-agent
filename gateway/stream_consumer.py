@@ -759,10 +759,12 @@ class GatewayStreamConsumer:
         if not text.strip():
             return False
         try:
+            meta = dict(self.metadata) if self.metadata else {}
+            meta["is_internal"] = True
             result = await self.adapter.send(
                 chat_id=self.chat_id,
                 content=text,
-                metadata=self.metadata,
+                metadata=meta,
             )
             # Note: do NOT set _already_sent = True here.
             # Commentary messages are interim status updates (e.g. "Using browser

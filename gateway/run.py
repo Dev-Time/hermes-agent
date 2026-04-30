@@ -6197,7 +6197,7 @@ class GatewayRunner:
                         f"{_compress_token_threshold:,}",
                     )
 
-                    _hyg_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    _hyg_meta = {"thread_id": source.thread_id, "is_internal": True} if source.thread_id else {"is_internal": True}
 
                     try:
                         from run_agent import AIAgent
@@ -11910,7 +11910,7 @@ class GatewayRunner:
                             break
                     if adapter and chat_id:
                         try:
-                            send_meta = {"thread_id": thread_id} if thread_id else None
+                            send_meta = {"thread_id": thread_id, "is_internal": True} if thread_id else {"is_internal": True}
                             await adapter.send(chat_id, message_text, metadata=send_meta)
                         except Exception as e:
                             logger.error("Watcher delivery error: %s", e)
@@ -11931,7 +11931,7 @@ class GatewayRunner:
                         break
                 if adapter and chat_id:
                     try:
-                        send_meta = {"thread_id": thread_id} if thread_id else None
+                        send_meta = {"thread_id": thread_id, "is_internal": True} if thread_id else {"is_internal": True}
                         await adapter.send(chat_id, message_text, metadata=send_meta)
                     except Exception as e:
                         logger.error("Watcher delivery error: %s", e)
@@ -12934,7 +12934,7 @@ class GatewayRunner:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
-        _progress_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _progress_metadata = {"thread_id": _progress_thread_id, "is_internal": True} if _progress_thread_id else {"is_internal": True}
 
         async def send_progress_messages():
             if not progress_queue:
@@ -13156,7 +13156,7 @@ class GatewayRunner:
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
-        _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _status_thread_metadata = {"thread_id": _progress_thread_id, "is_internal": True} if _progress_thread_id else {"is_internal": True}
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
