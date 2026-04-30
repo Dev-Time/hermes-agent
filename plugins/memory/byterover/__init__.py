@@ -220,18 +220,31 @@ class ByteRoverMemoryProvider(MemoryProvider):
             {
                 "key": "query_timeout",
                 "description": "Timeout for brv query (seconds)",
-                "default": str(_QUERY_TIMEOUT),
+                "default": _QUERY_TIMEOUT,
             },
             {
                 "key": "curate_timeout",
                 "description": "Timeout for brv curate (seconds)",
-                "default": str(_CURATE_TIMEOUT),
+                "default": _CURATE_TIMEOUT,
             },
         ]
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.byterover."""
         from pathlib import Path
         config_path = Path(hermes_home) / "config.yaml"
+
+        # Cast timeouts to ints if present
+        if "query_timeout" in values:
+            try:
+                values["query_timeout"] = int(values["query_timeout"])
+            except ValueError:
+                pass
+        if "curate_timeout" in values:
+            try:
+                values["curate_timeout"] = int(values["curate_timeout"])
+            except ValueError:
+                pass
+
         try:
             import yaml
             existing = {}
