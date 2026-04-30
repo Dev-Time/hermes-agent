@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
+from hermes_cli.config import cfg_get
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,25 @@ def _get_brv_cwd() -> Path:
     return get_hermes_home() / "byterover"
 
 
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+def _load_plugin_config() -> dict:
+    from hermes_constants import get_hermes_home
+    config_path = get_hermes_home() / "config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+        with open(config_path) as f:
+            all_config = yaml.safe_load(f) or {}
+        return cfg_get(all_config, "plugins", "byterover", default={}) or {}
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas
 # ---------------------------------------------------------------------------
@@ -172,10 +192,13 @@ class ByteRoverMemoryProvider(MemoryProvider):
     """ByteRover persistent memory via the brv CLI."""
 
     def __init__(self):
+        self._config = _load_plugin_config()
         self._cwd = ""
         self._session_id = ""
         self._turn_count = 0
         self._sync_thread: Optional[threading.Thread] = None
+        self._query_timeout = int(self._config.get("query_timeout", _QUERY_TIMEOUT))
+        self._curate_timeout = int(self._config.get("curate_timeout", _CURATE_TIMEOUT))
 
     @property
     def name(self) -> str:
@@ -194,7 +217,46 @@ class ByteRoverMemoryProvider(MemoryProvider):
                 "env_var": "BRV_API_KEY",
                 "url": "https://app.byterover.dev",
             },
+            {
+                "key": "query_timeout",
+                "description": "Timeout for brv query (seconds)",
+                "default": _QUERY_TIMEOUT,
+            },
+            {
+                "key": "curate_timeout",
+                "description": "Timeout for brv curate (seconds)",
+                "default": _CURATE_TIMEOUT,
+            },
         ]
+    def save_config(self, values, hermes_home):
+        """Write config to config.yaml under plugins.byterover."""
+        from pathlib import Path
+        config_path = Path(hermes_home) / "config.yaml"
+
+        # Cast timeouts to ints if present
+        if "query_timeout" in values:
+            try:
+                values["query_timeout"] = int(values["query_timeout"])
+            except ValueError:
+                pass
+        if "curate_timeout" in values:
+            try:
+                values["curate_timeout"] = int(values["curate_timeout"])
+            except ValueError:
+                pass
+
+        try:
+            import yaml
+            existing = {}
+            if config_path.exists():
+                with open(config_path) as f:
+                    existing = yaml.safe_load(f) or {}
+            existing.setdefault("plugins", {})
+            existing["plugins"]["byterover"] = values
+            with open(config_path, "w") as f:
+                yaml.dump(existing, f, default_flow_style=False)
+        except Exception:
+            pass
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._cwd = str(_get_brv_cwd())
@@ -222,7 +284,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
             return ""
         result = _run_brv(
             ["query", "--", query.strip()[:5000]],
-            timeout=_QUERY_TIMEOUT, cwd=self._cwd,
+            timeout=self._query_timeout, cwd=self._cwd,
         )
         if result["success"] and result.get("output"):
             output = result["output"].strip()
@@ -247,7 +309,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
                 combined = f"User: {user_content[:2000]}\nAssistant: {assistant_content[:2000]}"
                 _run_brv(
                     ["curate", "--", combined],
-                    timeout=_CURATE_TIMEOUT, cwd=self._cwd,
+                    timeout=self._curate_timeout, cwd=self._cwd,
                 )
             except Exception as e:
                 logger.debug("ByteRover sync failed: %s", e)
@@ -271,7 +333,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
                 label = "User profile" if target == "user" else "Agent memory"
                 _run_brv(
                     ["curate", "--", f"[{label}] {content}"],
-                    timeout=_CURATE_TIMEOUT, cwd=self._cwd,
+                    timeout=self._curate_timeout, cwd=self._cwd,
                 )
             except Exception as e:
                 logger.debug("ByteRover memory mirror failed: %s", e)
@@ -301,7 +363,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
             try:
                 _run_brv(
                     ["curate", "--", f"[Pre-compression context]\n{combined}"],
-                    timeout=_CURATE_TIMEOUT, cwd=self._cwd,
+                    timeout=self._curate_timeout, cwd=self._cwd,
                 )
                 logger.info("ByteRover pre-compression flush: %d messages", len(parts))
             except Exception as e:
@@ -336,7 +398,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
 
         result = _run_brv(
             ["query", "--", query.strip()[:5000]],
-            timeout=_QUERY_TIMEOUT, cwd=self._cwd,
+            timeout=self._query_timeout, cwd=self._cwd,
         )
 
         if not result["success"]:
@@ -359,7 +421,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
 
         result = _run_brv(
             ["curate", "--", content],
-            timeout=_CURATE_TIMEOUT, cwd=self._cwd,
+            timeout=self._curate_timeout, cwd=self._cwd,
         )
 
         if not result["success"]:
