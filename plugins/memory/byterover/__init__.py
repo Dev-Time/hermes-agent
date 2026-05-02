@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
+from agent.retry_utils import jittered_backoff
 from hermes_cli.config import cfg_get
 from tools.registry import tool_error
 
@@ -112,8 +113,8 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
                  return {"success": False, "error": f"Provider returned error: {error_msg}"}
 
             if attempt < max_retries - 1:
-                delay = 2 ** attempt
-                logger.debug(f"ByteRover provider returned error, retrying in {delay}s (attempt {attempt+1}/{max_retries}): {error_msg}")
+                delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
+                logger.debug(f"ByteRover provider returned error, retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries}): {error_msg}")
                 time.sleep(delay)
                 continue
 
@@ -121,8 +122,8 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
 
         except subprocess.TimeoutExpired:
             if attempt < max_retries - 1:
-                delay = 2 ** attempt
-                logger.debug(f"ByteRover provider network issue (timeout), retrying in {delay}s (attempt {attempt+1}/{max_retries})")
+                delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
+                logger.debug(f"ByteRover provider network issue (timeout), retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries})")
                 time.sleep(delay)
                 continue
             return {"success": False, "error": f"Network issue: brv timed out after {timeout}s"}
@@ -133,8 +134,8 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
             return {"success": False, "error": "brv CLI not found"}
         except Exception as e:
             if attempt < max_retries - 1:
-                delay = 2 ** attempt
-                logger.debug(f"ByteRover provider error, retrying in {delay}s (attempt {attempt+1}/{max_retries}): {e}")
+                delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
+                logger.debug(f"ByteRover provider error, retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries}): {e}")
                 time.sleep(delay)
                 continue
             return {"success": False, "error": f"Provider returned error: {str(e)}"}
