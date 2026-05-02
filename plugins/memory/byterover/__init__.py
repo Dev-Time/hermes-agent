@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,7 +79,7 @@ def _resolve_brv_path() -> Optional[str]:
 
 def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
              cwd: str = None) -> dict:
-    """Run a brv CLI command. Returns {success, output, error}."""
+    """Run a brv CLI command with retry logic. Returns {success, output, error}."""
     brv_path = _resolve_brv_path()
     if not brv_path:
         return {"success": False, "error": "brv CLI not found. Install: npm install -g byterover-cli"}
@@ -91,27 +92,54 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
     brv_bin_dir = str(Path(brv_path).parent)
     env["PATH"] = brv_bin_dir + os.pathsep + env.get("PATH", "")
 
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout, cwd=effective_cwd, env=env,
-        )
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
+    max_retries = 4
+    for attempt in range(max_retries):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=timeout, cwd=effective_cwd, env=env,
+            )
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
 
-        if result.returncode == 0:
-            return {"success": True, "output": stdout}
-        return {"success": False, "error": stderr or stdout or f"brv exited {result.returncode}"}
+            if result.returncode == 0:
+                return {"success": True, "output": stdout}
 
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": f"brv timed out after {timeout}s"}
-    except FileNotFoundError:
-        global _cached_brv_path
-        with _brv_path_lock:
-            _cached_brv_path = None
-        return {"success": False, "error": "brv CLI not found"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+            error_msg = stderr or stdout or f"brv exited {result.returncode}"
+
+            # Don't retry on user errors
+            if "not found" in error_msg.lower() or "invalid" in error_msg.lower():
+                 return {"success": False, "error": f"Provider returned error: {error_msg}"}
+
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt
+                logger.debug(f"ByteRover provider returned error, retrying in {delay}s (attempt {attempt+1}/{max_retries}): {error_msg}")
+                time.sleep(delay)
+                continue
+
+            return {"success": False, "error": f"Provider returned error after {max_retries} attempts: {error_msg}"}
+
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt
+                logger.debug(f"ByteRover provider network issue (timeout), retrying in {delay}s (attempt {attempt+1}/{max_retries})")
+                time.sleep(delay)
+                continue
+            return {"success": False, "error": f"Network issue: brv timed out after {timeout}s"}
+        except FileNotFoundError:
+            global _cached_brv_path
+            with _brv_path_lock:
+                _cached_brv_path = None
+            return {"success": False, "error": "brv CLI not found"}
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt
+                logger.debug(f"ByteRover provider error, retrying in {delay}s (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(delay)
+                continue
+            return {"success": False, "error": f"Provider returned error: {str(e)}"}
+
+    return {"success": False, "error": "All retry attempts exhausted"}
 
 
 def _get_brv_cwd() -> Path:
@@ -305,13 +333,21 @@ class ByteRoverMemoryProvider(MemoryProvider):
             return
 
         def _sync():
+            if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
+                return
             try:
                 combined = f"User: {user_content[:2000]}\nAssistant: {assistant_content[:2000]}"
-                _run_brv(
+                result = _run_brv(
                     ["curate", "--", combined],
                     timeout=self._curate_timeout, cwd=self._cwd,
                 )
+                if not result["success"]:
+                     self._record_failure()
+                     logger.debug(f"ByteRover sync failed: {result.get('error')}")
+                else:
+                     self._record_success()
             except Exception as e:
+                self._record_failure()
                 logger.debug("ByteRover sync failed: %s", e)
 
         # Wait for previous sync
@@ -329,13 +365,21 @@ class ByteRoverMemoryProvider(MemoryProvider):
             return
 
         def _write():
+            if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
+                return
             try:
                 label = "User profile" if target == "user" else "Agent memory"
-                _run_brv(
+                result = _run_brv(
                     ["curate", "--", f"[{label}] {content}"],
                     timeout=self._curate_timeout, cwd=self._cwd,
                 )
+                if not result["success"]:
+                     self._record_failure()
+                     logger.debug(f"ByteRover memory mirror failed: {result.get('error')}")
+                else:
+                     self._record_success()
             except Exception as e:
+                self._record_failure()
                 logger.debug("ByteRover memory mirror failed: %s", e)
 
         t = threading.Thread(target=_write, daemon=True, name="brv-memwrite")
@@ -360,13 +404,21 @@ class ByteRoverMemoryProvider(MemoryProvider):
         combined = "\n".join(parts)
 
         def _flush():
+            if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
+                return
             try:
-                _run_brv(
+                result = _run_brv(
                     ["curate", "--", f"[Pre-compression context]\n{combined}"],
                     timeout=self._curate_timeout, cwd=self._cwd,
                 )
-                logger.info("ByteRover pre-compression flush: %d messages", len(parts))
+                if not result["success"]:
+                     self._record_failure()
+                     logger.debug(f"ByteRover pre-compression flush failed: {result.get('error')}")
+                else:
+                     self._record_success()
+                     logger.info("ByteRover pre-compression flush: %d messages", len(parts))
             except Exception as e:
+                self._record_failure()
                 logger.debug("ByteRover pre-compression flush failed: %s", e)
 
         t = threading.Thread(target=_flush, daemon=True, name="brv-flush")
@@ -396,14 +448,20 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if not query:
             return tool_error("query is required")
 
+        if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
+            return json.dumps({"result": "ByteRover provider is temporarily unavailable. Using local memory only."})
+
         result = _run_brv(
             ["query", "--", query.strip()[:5000]],
             timeout=self._query_timeout, cwd=self._cwd,
         )
 
         if not result["success"]:
-            return tool_error(result.get("error", "Query failed"))
+            self._record_failure()
+            logger.warning(f"ByteRover query failed: {result.get('error')}")
+            return json.dumps({"result": "ByteRover provider temporarily unavailable, proceeding with local context."})
 
+        self._record_success()
         output = result.get("output", "").strip()
         if not output or len(output) < _MIN_OUTPUT_LEN:
             return json.dumps({"result": "No relevant memories found."})
@@ -419,21 +477,53 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if not content:
             return tool_error("content is required")
 
-        result = _run_brv(
-            ["curate", "--", content],
-            timeout=self._curate_timeout, cwd=self._cwd,
-        )
+        if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
+            return json.dumps({"result": "ByteRover provider is temporarily unavailable. Memory sync skipped, local memory still active."})
 
-        if not result["success"]:
-            return tool_error(result.get("error", "Curate failed"))
+        def _bg_curate():
+            result = _run_brv(
+                ["curate", "--", content],
+                timeout=self._curate_timeout, cwd=self._cwd,
+            )
+            if not result["success"]:
+                self._record_failure()
+                logger.warning(f"ByteRover background curate failed: {result.get('error')}")
+            else:
+                self._record_success()
 
-        return json.dumps({"result": "Memory curated successfully."})
+        # Run in background to avoid blocking session
+        t = threading.Thread(target=_bg_curate, daemon=True, name="brv-tool-curate")
+        t.start()
+
+        return json.dumps({"result": "Memory curate initiated in background."})
 
     def _tool_status(self) -> str:
+        if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
+             return json.dumps({"status": "ByteRover provider is temporarily offline due to repeated failures."})
+
         result = _run_brv(["status"], timeout=15, cwd=self._cwd)
         if not result["success"]:
-            return tool_error(result.get("error", "Status check failed"))
+            self._record_failure()
+            return json.dumps({"status": f"Status check failed: {result.get('error')}"})
+
+        self._record_success()
         return json.dumps({"status": result.get("output", "")})
+
+    def _record_failure(self):
+        """Record a provider failure to implement circuit breaking."""
+        self._consecutive_failures = getattr(self, "_consecutive_failures", 0) + 1
+        if self._consecutive_failures >= 3:
+            self._circuit_breaker_open = True
+            # Open circuit for 5 minutes
+            self._circuit_breaker_expiry = time.time() + 300
+            logger.error("ByteRover circuit breaker opened due to repeated failures.")
+
+    def _record_success(self):
+        """Record a provider success, closing the circuit breaker if open."""
+        self._consecutive_failures = 0
+        if getattr(self, "_circuit_breaker_open", False):
+            self._circuit_breaker_open = False
+            logger.info("ByteRover circuit breaker closed (provider recovered).")
 
 
 # ---------------------------------------------------------------------------
