@@ -79,8 +79,8 @@ def _resolve_brv_path() -> Optional[str]:
 
 
 def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
-             cwd: str = None) -> dict:
-    """Run a brv CLI command with retry logic and time budget. Returns {success, output, error}."""
+             cwd: str = None, time_budget: Optional[float] = None) -> dict:
+    """Run a brv CLI command with retry logic and optional time budget. Returns {success, output, error}."""
     brv_path = _resolve_brv_path()
     if not brv_path:
         return {"success": False, "error": "brv CLI not found. Install: npm install -g byterover-cli"}
@@ -97,15 +97,16 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
     start_time = time.time()
 
     for attempt in range(max_retries):
-        elapsed = time.time() - start_time
-        remaining_budget = timeout - elapsed
+        attempt_timeout = timeout
 
-        if remaining_budget <= 0:
-            return {"success": False, "error": f"Total time budget ({timeout}s) exhausted"}
+        if time_budget is not None:
+            elapsed = time.time() - start_time
+            remaining_budget = time_budget - elapsed
 
-        # Fail fast per-attempt to avoid blocking the whole session
-        # (max 10s per attempt unless remaining budget is smaller)
-        attempt_timeout = min(10.0, remaining_budget)
+            if remaining_budget <= 0:
+                return {"success": False, "error": f"Total time budget ({time_budget}s) exhausted"}
+
+            attempt_timeout = min(timeout, remaining_budget)
 
         try:
             result = subprocess.run(
@@ -126,8 +127,8 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
 
             if attempt < max_retries - 1:
                 delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
-                # Ensure sleep doesn't blow budget
-                delay = min(delay, max(0.1, timeout - (time.time() - start_time) - 1.0))
+                if time_budget is not None:
+                    delay = min(delay, max(0.1, time_budget - (time.time() - start_time) - 1.0))
                 logger.debug(f"ByteRover provider returned error, retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries}): {error_msg}")
                 time.sleep(delay)
                 continue
@@ -137,7 +138,8 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
         except subprocess.TimeoutExpired:
             if attempt < max_retries - 1:
                 delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
-                delay = min(delay, max(0.1, timeout - (time.time() - start_time) - 1.0))
+                if time_budget is not None:
+                    delay = min(delay, max(0.1, time_budget - (time.time() - start_time) - 1.0))
                 logger.debug(f"ByteRover provider network issue (timeout), retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries})")
                 time.sleep(delay)
                 continue
@@ -150,7 +152,8 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
         except Exception as e:
             if attempt < max_retries - 1:
                 delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
-                delay = min(delay, max(0.1, timeout - (time.time() - start_time) - 1.0))
+                if time_budget is not None:
+                    delay = min(delay, max(0.1, time_budget - (time.time() - start_time) - 1.0))
                 logger.debug(f"ByteRover provider error, retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries}): {e}")
                 time.sleep(delay)
                 continue
@@ -244,6 +247,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
         self._sync_thread: Optional[threading.Thread] = None
         self._query_timeout = int(self._config.get("query_timeout", _QUERY_TIMEOUT))
         self._curate_timeout = int(self._config.get("curate_timeout", _CURATE_TIMEOUT))
+        self._time_budget = int(self._config.get("time_budget", 30))
 
     @property
     def name(self) -> str:
@@ -272,6 +276,11 @@ class ByteRoverMemoryProvider(MemoryProvider):
                 "description": "Timeout for brv curate (seconds)",
                 "default": _CURATE_TIMEOUT,
             },
+            {
+                "key": "time_budget",
+                "description": "Total time budget for synchronous tool retries (seconds)",
+                "default": 30,
+            },
         ]
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.byterover."""
@@ -287,6 +296,11 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if "curate_timeout" in values:
             try:
                 values["curate_timeout"] = int(values["curate_timeout"])
+            except ValueError:
+                pass
+        if "time_budget" in values:
+            try:
+                values["time_budget"] = int(values["time_budget"])
             except ValueError:
                 pass
 
@@ -329,7 +343,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
             return ""
         result = _run_brv(
             ["query", "--", query.strip()[:5000]],
-            timeout=self._query_timeout, cwd=self._cwd,
+            timeout=self._query_timeout, cwd=self._cwd, time_budget=self._time_budget,
         )
         if result["success"] and result.get("output"):
             output = result["output"].strip()
@@ -350,8 +364,6 @@ class ByteRoverMemoryProvider(MemoryProvider):
             return
 
         def _sync():
-            if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
-                return
             try:
                 combined = f"User: {user_content[:2000]}\nAssistant: {assistant_content[:2000]}"
                 result = _run_brv(
@@ -359,12 +371,8 @@ class ByteRoverMemoryProvider(MemoryProvider):
                     timeout=self._curate_timeout, cwd=self._cwd,
                 )
                 if not result["success"]:
-                     self._record_failure()
-                     logger.debug(f"ByteRover sync failed: {result.get('error')}")
-                else:
-                     self._record_success()
+                    logger.debug(f"ByteRover sync failed: {result.get('error')}")
             except Exception as e:
-                self._record_failure()
                 logger.debug("ByteRover sync failed: %s", e)
 
         # Wait for previous sync
@@ -382,8 +390,6 @@ class ByteRoverMemoryProvider(MemoryProvider):
             return
 
         def _write():
-            if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
-                return
             try:
                 label = "User profile" if target == "user" else "Agent memory"
                 result = _run_brv(
@@ -391,12 +397,8 @@ class ByteRoverMemoryProvider(MemoryProvider):
                     timeout=self._curate_timeout, cwd=self._cwd,
                 )
                 if not result["success"]:
-                     self._record_failure()
-                     logger.debug(f"ByteRover memory mirror failed: {result.get('error')}")
-                else:
-                     self._record_success()
+                    logger.debug(f"ByteRover memory mirror failed: {result.get('error')}")
             except Exception as e:
-                self._record_failure()
                 logger.debug("ByteRover memory mirror failed: %s", e)
 
         t = threading.Thread(target=_write, daemon=True, name="brv-memwrite")
@@ -421,21 +423,16 @@ class ByteRoverMemoryProvider(MemoryProvider):
         combined = "\n".join(parts)
 
         def _flush():
-            if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
-                return
             try:
                 result = _run_brv(
                     ["curate", "--", f"[Pre-compression context]\n{combined}"],
                     timeout=self._curate_timeout, cwd=self._cwd,
                 )
                 if not result["success"]:
-                     self._record_failure()
-                     logger.debug(f"ByteRover pre-compression flush failed: {result.get('error')}")
+                    logger.debug(f"ByteRover pre-compression flush failed: {result.get('error')}")
                 else:
-                     self._record_success()
-                     logger.info("ByteRover pre-compression flush: %d messages", len(parts))
+                    logger.info("ByteRover pre-compression flush: %d messages", len(parts))
             except Exception as e:
-                self._record_failure()
                 logger.debug("ByteRover pre-compression flush failed: %s", e)
 
         t = threading.Thread(target=_flush, daemon=True, name="brv-flush")
@@ -465,21 +462,17 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if not query:
             return tool_error("query is required")
 
-        if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
-            return json.dumps({"result": "ByteRover provider is temporarily unavailable. Using local memory only."})
 
         try:
             result = _run_brv(
                 ["query", "--", query.strip()[:5000]],
-                timeout=self._query_timeout, cwd=self._cwd,
+                timeout=self._query_timeout, cwd=self._cwd, time_budget=self._time_budget,
             )
 
             if not result["success"]:
-                self._record_failure()
                 logger.warning(f"ByteRover query failed: {result.get('error')}")
                 return json.dumps({"result": "ByteRover provider temporarily unavailable, proceeding with local context."})
 
-            self._record_success()
             output = result.get("output", "").strip()
             if not output or len(output) < _MIN_OUTPUT_LEN:
                 return json.dumps({"result": "No relevant memories found."})
@@ -490,7 +483,6 @@ class ByteRoverMemoryProvider(MemoryProvider):
 
             return json.dumps({"result": output})
         except Exception as e:
-            self._record_failure()
             logger.warning(f"ByteRover query failed with exception: {e}")
             return json.dumps({"result": "ByteRover provider temporarily unavailable, proceeding with local context."})
 
@@ -499,8 +491,6 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if not content:
             return tool_error("content is required")
 
-        if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
-            return json.dumps({"result": "ByteRover provider is temporarily unavailable. Memory sync skipped, local memory still active."})
 
         def _bg_curate():
             try:
@@ -509,12 +499,8 @@ class ByteRoverMemoryProvider(MemoryProvider):
                     timeout=self._curate_timeout, cwd=self._cwd,
                 )
                 if not result["success"]:
-                    self._record_failure()
                     logger.warning(f"ByteRover background curate failed: {result.get('error')}")
-                else:
-                    self._record_success()
             except Exception as e:
-                self._record_failure()
                 logger.warning(f"ByteRover background curate failed with exception: {e}")
 
         # Run in background to avoid blocking session
@@ -524,36 +510,16 @@ class ByteRoverMemoryProvider(MemoryProvider):
         return json.dumps({"result": "Memory curate initiated in background."})
 
     def _tool_status(self) -> str:
-        if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
-             return json.dumps({"status": "ByteRover provider is temporarily offline due to repeated failures."})
 
         try:
-            result = _run_brv(["status"], timeout=15, cwd=self._cwd)
+            result = _run_brv(["status"], timeout=15, cwd=self._cwd, time_budget=self._time_budget)
             if not result["success"]:
-                self._record_failure()
                 return json.dumps({"status": f"Status check failed: {result.get('error')}"})
 
-            self._record_success()
             return json.dumps({"status": result.get("output", "")})
         except Exception as e:
-            self._record_failure()
             return json.dumps({"status": f"Status check failed with exception: {e}"})
 
-    def _record_failure(self):
-        """Record a provider failure to implement circuit breaking."""
-        self._consecutive_failures = getattr(self, "_consecutive_failures", 0) + 1
-        if self._consecutive_failures >= 3:
-            self._circuit_breaker_open = True
-            # Open circuit for 5 minutes
-            self._circuit_breaker_expiry = time.time() + 300
-            logger.error("ByteRover circuit breaker opened due to repeated failures.")
-
-    def _record_success(self):
-        """Record a provider success, closing the circuit breaker if open."""
-        self._consecutive_failures = 0
-        if getattr(self, "_circuit_breaker_open", False):
-            self._circuit_breaker_open = False
-            logger.info("ByteRover circuit breaker closed (provider recovered).")
 
 
 # ---------------------------------------------------------------------------
