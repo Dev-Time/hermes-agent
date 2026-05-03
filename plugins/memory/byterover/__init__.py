@@ -468,26 +468,31 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
             return json.dumps({"result": "ByteRover provider is temporarily unavailable. Using local memory only."})
 
-        result = _run_brv(
-            ["query", "--", query.strip()[:5000]],
-            timeout=self._query_timeout, cwd=self._cwd,
-        )
+        try:
+            result = _run_brv(
+                ["query", "--", query.strip()[:5000]],
+                timeout=self._query_timeout, cwd=self._cwd,
+            )
 
-        if not result["success"]:
+            if not result["success"]:
+                self._record_failure()
+                logger.warning(f"ByteRover query failed: {result.get('error')}")
+                return json.dumps({"result": "ByteRover provider temporarily unavailable, proceeding with local context."})
+
+            self._record_success()
+            output = result.get("output", "").strip()
+            if not output or len(output) < _MIN_OUTPUT_LEN:
+                return json.dumps({"result": "No relevant memories found."})
+
+            # Truncate very long results
+            if len(output) > 8000:
+                output = output[:8000] + "\n\n[... truncated]"
+
+            return json.dumps({"result": output})
+        except Exception as e:
             self._record_failure()
-            logger.warning(f"ByteRover query failed: {result.get('error')}")
+            logger.warning(f"ByteRover query failed with exception: {e}")
             return json.dumps({"result": "ByteRover provider temporarily unavailable, proceeding with local context."})
-
-        self._record_success()
-        output = result.get("output", "").strip()
-        if not output or len(output) < _MIN_OUTPUT_LEN:
-            return json.dumps({"result": "No relevant memories found."})
-
-        # Truncate very long results
-        if len(output) > 8000:
-            output = output[:8000] + "\n\n[... truncated]"
-
-        return json.dumps({"result": output})
 
     def _tool_curate(self, args: dict) -> str:
         content = args.get("content", "")
@@ -498,15 +503,19 @@ class ByteRoverMemoryProvider(MemoryProvider):
             return json.dumps({"result": "ByteRover provider is temporarily unavailable. Memory sync skipped, local memory still active."})
 
         def _bg_curate():
-            result = _run_brv(
-                ["curate", "--", content],
-                timeout=self._curate_timeout, cwd=self._cwd,
-            )
-            if not result["success"]:
+            try:
+                result = _run_brv(
+                    ["curate", "--", content],
+                    timeout=self._curate_timeout, cwd=self._cwd,
+                )
+                if not result["success"]:
+                    self._record_failure()
+                    logger.warning(f"ByteRover background curate failed: {result.get('error')}")
+                else:
+                    self._record_success()
+            except Exception as e:
                 self._record_failure()
-                logger.warning(f"ByteRover background curate failed: {result.get('error')}")
-            else:
-                self._record_success()
+                logger.warning(f"ByteRover background curate failed with exception: {e}")
 
         # Run in background to avoid blocking session
         t = threading.Thread(target=_bg_curate, daemon=True, name="brv-tool-curate")
@@ -518,13 +527,17 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if getattr(self, "_circuit_breaker_open", False) and time.time() < getattr(self, "_circuit_breaker_expiry", 0):
              return json.dumps({"status": "ByteRover provider is temporarily offline due to repeated failures."})
 
-        result = _run_brv(["status"], timeout=15, cwd=self._cwd)
-        if not result["success"]:
-            self._record_failure()
-            return json.dumps({"status": f"Status check failed: {result.get('error')}"})
+        try:
+            result = _run_brv(["status"], timeout=15, cwd=self._cwd)
+            if not result["success"]:
+                self._record_failure()
+                return json.dumps({"status": f"Status check failed: {result.get('error')}"})
 
-        self._record_success()
-        return json.dumps({"status": result.get("output", "")})
+            self._record_success()
+            return json.dumps({"status": result.get("output", "")})
+        except Exception as e:
+            self._record_failure()
+            return json.dumps({"status": f"Status check failed with exception: {e}"})
 
     def _record_failure(self):
         """Record a provider failure to implement circuit breaking."""
