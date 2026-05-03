@@ -80,7 +80,7 @@ def _resolve_brv_path() -> Optional[str]:
 
 def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
              cwd: str = None) -> dict:
-    """Run a brv CLI command with retry logic. Returns {success, output, error}."""
+    """Run a brv CLI command with retry logic and time budget. Returns {success, output, error}."""
     brv_path = _resolve_brv_path()
     if not brv_path:
         return {"success": False, "error": "brv CLI not found. Install: npm install -g byterover-cli"}
@@ -94,11 +94,23 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
     env["PATH"] = brv_bin_dir + os.pathsep + env.get("PATH", "")
 
     max_retries = 4
+    start_time = time.time()
+
     for attempt in range(max_retries):
+        elapsed = time.time() - start_time
+        remaining_budget = timeout - elapsed
+
+        if remaining_budget <= 0:
+            return {"success": False, "error": f"Total time budget ({timeout}s) exhausted"}
+
+        # Fail fast per-attempt to avoid blocking the whole session
+        # (max 10s per attempt unless remaining budget is smaller)
+        attempt_timeout = min(10.0, remaining_budget)
+
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True,
-                timeout=timeout, cwd=effective_cwd, env=env,
+                timeout=attempt_timeout, cwd=effective_cwd, env=env,
             )
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
@@ -114,6 +126,8 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
 
             if attempt < max_retries - 1:
                 delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
+                # Ensure sleep doesn't blow budget
+                delay = min(delay, max(0.1, timeout - (time.time() - start_time) - 1.0))
                 logger.debug(f"ByteRover provider returned error, retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries}): {error_msg}")
                 time.sleep(delay)
                 continue
@@ -123,10 +137,11 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
         except subprocess.TimeoutExpired:
             if attempt < max_retries - 1:
                 delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
+                delay = min(delay, max(0.1, timeout - (time.time() - start_time) - 1.0))
                 logger.debug(f"ByteRover provider network issue (timeout), retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries})")
                 time.sleep(delay)
                 continue
-            return {"success": False, "error": f"Network issue: brv timed out after {timeout}s"}
+            return {"success": False, "error": f"Network issue: brv timed out repeatedly."}
         except FileNotFoundError:
             global _cached_brv_path
             with _brv_path_lock:
@@ -135,6 +150,7 @@ def _run_brv(args: List[str], timeout: int = _QUERY_TIMEOUT,
         except Exception as e:
             if attempt < max_retries - 1:
                 delay = jittered_backoff(attempt + 1, base_delay=1.0, max_delay=8.0)
+                delay = min(delay, max(0.1, timeout - (time.time() - start_time) - 1.0))
                 logger.debug(f"ByteRover provider error, retrying in {delay:.2f}s (attempt {attempt+1}/{max_retries}): {e}")
                 time.sleep(delay)
                 continue
