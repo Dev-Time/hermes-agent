@@ -168,6 +168,56 @@ def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(m
     assert result.status == "unknown"
 
 
+def test_estimate_usage_cost_openrouter_uses_response_cost():
+    usage = CanonicalUsage(
+        input_tokens=1000,
+        output_tokens=500,
+        raw_usage={"total_cost": 0.0003},
+    )
+    result = estimate_usage_cost(
+        "anthropic/claude-3-opus-20240229",
+        usage,
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    assert result.status == "actual"
+    assert float(result.amount_usd) == 0.0003
+    assert result.source == "provider_generation_api"
+    assert "$0.0003" in result.label
+
+
+def test_estimate_usage_cost_openrouter_falls_back_when_no_cost_in_response(monkeypatch):
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_model_metadata",
+        lambda: {
+            "anthropic/claude-opus-4.6": {
+                "pricing": {
+                    "prompt": "0.000005",
+                    "completion": "0.000025",
+                }
+            }
+        },
+    )
+
+    # Missing total_cost in raw_usage
+    usage = CanonicalUsage(
+        input_tokens=1000,
+        output_tokens=500,
+        raw_usage={"some_other_field": 123},
+    )
+    result = estimate_usage_cost(
+        "anthropic/claude-opus-4.6",
+        usage,
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    assert result.status == "estimated"
+    # Local estimate: 1000 * 5e-6 + 500 * 25e-6 = 0.005 + 0.0125 = 0.0175
+    assert float(result.amount_usd) == 0.0175
+
+
 def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_endpoint_model_metadata",

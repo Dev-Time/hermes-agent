@@ -147,6 +147,59 @@ def test_format_footer_unknown_field_silently_ignored():
     assert out == "gpt-5.4 · 50%"
 
 
+def test_format_footer_with_cost():
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        estimated_cost_usd=0.042,
+        fields=("api_cost",),
+    )
+    assert out == "$0.04"
+
+    out2 = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        estimated_cost_usd=999.99,
+        fields=("api_cost",),
+    )
+    assert out2 == "$999.99"
+
+
+def test_format_footer_cost_skipped_when_missing():
+    # None
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        estimated_cost_usd=None,
+        fields=("api_cost",),
+    )
+    assert out == ""
+
+    # Zero
+    out2 = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        estimated_cost_usd=0.0,
+        fields=("api_cost",),
+    )
+    assert out2 == ""
+
+    # Negative
+    out3 = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        estimated_cost_usd=-0.05,
+        fields=("api_cost",),
+    )
+    assert out3 == ""
+
+
+def test_format_footer_cost_with_other_fields():
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        context_tokens=50, context_length=100,
+        cwd="",
+        estimated_cost_usd=0.15,
+        fields=("model", "context_pct", "api_cost"),
+    )
+    assert out == "gpt-5.4 · 50% · $0.15"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------

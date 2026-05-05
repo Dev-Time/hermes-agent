@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import decimal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -583,6 +584,7 @@ def normalize_usage(
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         reasoning_tokens=reasoning_tokens,
+        raw_usage=response_usage,
     )
 
 
@@ -603,6 +605,26 @@ def estimate_usage_cost(
             label="included",
             pricing_version="included-route",
         )
+
+    # If the provider includes actual cost data in the API response, use that
+    # instead of local estimation. OpenRouter returns prompt_cost/completion_cost/total_cost.
+    raw = getattr(usage, "raw_usage", None)
+    if isinstance(raw, dict):
+        provider_cost_key = None
+        if route.provider == "openrouter":
+            provider_cost_key = "total_cost"
+        if provider_cost_key and raw.get(provider_cost_key) is not None:
+            try:
+                actual_cost = Decimal(str(raw[provider_cost_key]))
+                return CostResult(
+                    amount_usd=actual_cost,
+                    status="actual",
+                    source="provider_generation_api",
+                    label=f"${float(actual_cost):.4f}",
+                    notes=("Cost from provider API response",),
+                )
+            except (TypeError, ValueError, decimal.InvalidOperation):
+                pass  # Fall through to local estimation
 
     entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
     if not entry:
