@@ -868,7 +868,6 @@ def skill_view(
         JSON string with skill content or error message
     """
     try:
-        local_category_name: str | None = None
         # ── Qualified name dispatch (plugin skills) ──────────────────
         # Names containing ':' are routed to the plugin skill registry.
         # Bare names fall through to the existing flat-tree scan below.
@@ -929,12 +928,8 @@ def skill_view(
                     },
                     ensure_ascii=False,
                 )
-            # Plugin itself not found — fall through to flat-tree scan.
-            # Categorized local skills also use `category:skill` in config and
-            # gateway prompts, so preserve that form and translate it to the
-            # on-disk `category/skill` path during the local scan below.
-            if bare:
-                local_category_name = f"{namespace}/{bare}"
+            # Plugin itself not found — fall through to flat-tree scan
+            # which will return a normal "not found" with suggestions.
 
         from agent.skill_utils import get_external_skills_dirs
 
@@ -967,15 +962,6 @@ def skill_view(
             elif direct_path.with_suffix(".md").exists():
                 skill_md = direct_path.with_suffix(".md")
                 break
-            if local_category_name:
-                categorized_path = search_dir / local_category_name
-                if categorized_path.is_dir() and (categorized_path / "SKILL.md").exists():
-                    skill_dir = categorized_path
-                    skill_md = categorized_path / "SKILL.md"
-                    break
-                elif categorized_path.with_suffix(".md").exists():
-                    skill_md = categorized_path.with_suffix(".md")
-                    break
 
         # Search by directory name across all dirs
         if not skill_md:

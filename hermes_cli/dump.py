@@ -14,7 +14,6 @@ import sys
 from pathlib import Path
 
 from hermes_cli.config import get_hermes_home, get_env_path, get_project_root, load_config
-from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_constants import display_hermes_home
 
 
@@ -196,11 +195,15 @@ def run_dump(args):
     show_keys = getattr(args, "show_keys", False)
 
     # Load env from .env file so key checks work
+    from dotenv import load_dotenv
     env_path = get_env_path()
-    load_hermes_dotenv(
-        hermes_home=env_path.parent,
-        project_env=get_project_root() / ".env",
-    )
+    if env_path.exists():
+        try:
+            load_dotenv(env_path, encoding="utf-8")
+        except UnicodeDecodeError:
+            load_dotenv(env_path, encoding="latin-1")
+    # Also try project .env as dev fallback
+    load_dotenv(get_project_root() / ".env", override=False, encoding="utf-8")
 
     project_root = get_project_root()
     hermes_home = get_hermes_home()

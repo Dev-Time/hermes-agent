@@ -153,14 +153,14 @@ def test_format_footer_with_cost():
         estimated_cost_usd=0.042,
         fields=("api_cost",),
     )
-    assert out == "$0.04"
+    assert out == "$0.0420"
 
     out2 = format_runtime_footer(
         model="m", context_tokens=0, context_length=None, cwd="",
         estimated_cost_usd=999.99,
         fields=("api_cost",),
     )
-    assert out2 == "$999.99"
+    assert out2 == "$999.9900"
 
 
 def test_format_footer_cost_skipped_when_missing():
@@ -197,7 +197,7 @@ def test_format_footer_cost_with_other_fields():
         estimated_cost_usd=0.15,
         fields=("model", "context_pct", "api_cost"),
     )
-    assert out == "gpt-5.4 · 50% · $0.15"
+    assert out == "gpt-5.4 · 50% · $0.1500"
 
 
 # ---------------------------------------------------------------------------

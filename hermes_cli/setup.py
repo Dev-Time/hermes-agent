@@ -15,7 +15,6 @@ import importlib.util
 import json
 import logging
 import os
-import re
 import shutil
 import sys
 import copy
@@ -209,21 +208,10 @@ def prompt(question: str, default: str = None, password: bool = False) -> str:
         else:
             value = input(color(display, Colors.YELLOW))
 
-        cleaned = _sanitize_pasted_input(value)
-        return cleaned.strip() or default or ""
+        return value.strip() or default or ""
     except (KeyboardInterrupt, EOFError):
         print()
         sys.exit(1)
-
-
-_BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
-
-
-def _sanitize_pasted_input(value: str) -> str:
-    """Strip terminal bracketed-paste control markers from pasted text."""
-    if not isinstance(value, str) or not value:
-        return value
-    return _BRACKETED_PASTE_PATTERN.sub("", value)
 
 
 def _curses_prompt_choice(question: str, choices: list, default: int = 0, description: str | None = None) -> int:

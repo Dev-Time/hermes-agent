@@ -222,37 +222,33 @@ class ThreadParticipationTracker:
     def __init__(self, platform_name: str, max_tracked: int = 500):
         self._platform = platform_name
         self._max_tracked = max_tracked
-        self._threads: dict[str, None] = {
-            str(thread_id): None for thread_id in self._load()
-        }
+        self._threads: set = self._load()
 
     def _state_path(self) -> Path:
         from hermes_constants import get_hermes_home
         return get_hermes_home() / f"{self._platform}_threads.json"
 
-    def _load(self) -> list[str]:
+    def _load(self) -> set:
         path = self._state_path()
         if path.exists():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    return [str(thread_id) for thread_id in data]
+                return set(json.loads(path.read_text(encoding="utf-8")))
             except Exception:
                 pass
-        return []
+        return set()
 
     def _save(self) -> None:
         path = self._state_path()
         thread_list = list(self._threads)
         if len(thread_list) > self._max_tracked:
             thread_list = thread_list[-self._max_tracked:]
-            self._threads = {thread_id: None for thread_id in thread_list}
+            self._threads = set(thread_list)
         atomic_json_write(path, thread_list, indent=None)
 
     def mark(self, thread_id: str) -> None:
         """Mark *thread_id* as participated and persist."""
         if thread_id not in self._threads:
-            self._threads[thread_id] = None
+            self._threads.add(thread_id)
             self._save()
 
     def __contains__(self, thread_id: str) -> bool:

@@ -119,7 +119,7 @@ def format_runtime_footer(
                 parts.append(rel)
         elif field == "api_cost":
             if estimated_cost_usd is not None and estimated_cost_usd > 0:
-                parts.append(f"${estimated_cost_usd:.2f}")
+                parts.append(f"${estimated_cost_usd:.4f}")
         # Unknown field names are silently ignored.
 
     if not parts:
