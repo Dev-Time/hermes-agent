@@ -34,6 +34,7 @@ class CanonicalUsage:
     reasoning_tokens: int = 0
     request_count: int = 1
     raw_usage: Optional[dict[str, Any]] = None
+    actual_cost_usd: Optional[float] = None
 
     @property
     def prompt_tokens(self) -> int:
@@ -577,12 +578,24 @@ def normalize_usage(
     if output_details:
         reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
 
+    actual_cost_usd = None
+    _raw_cost = getattr(response_usage, "cost", None)
+    if _raw_cost is None and isinstance(response_usage, dict):
+        _raw_cost = response_usage.get("cost")
+
+    if _raw_cost is not None:
+        try:
+            actual_cost_usd = float(_raw_cost)
+        except (TypeError, ValueError):
+            pass
+
     return CanonicalUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         reasoning_tokens=reasoning_tokens,
+        actual_cost_usd=actual_cost_usd,
     )
 
 
@@ -595,6 +608,17 @@ def estimate_usage_cost(
     api_key: Optional[str] = None,
 ) -> CostResult:
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
+
+    if usage.actual_cost_usd is not None:
+        amt = Decimal(str(usage.actual_cost_usd))
+        return CostResult(
+            amount_usd=amt,
+            status="actual",
+            source="provider_generation_api",
+            label=f"${amt:.5f}".rstrip("0").rstrip(".") if amt > 0 else "$0.00",
+            pricing_version="response-usage",
+        )
+
     if route.billing_mode == "subscription_included":
         return CostResult(
             amount_usd=_ZERO,

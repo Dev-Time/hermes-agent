@@ -6543,6 +6543,7 @@ class GatewayRunner:
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
+                    api_cost=agent_result.get("estimated_cost_usd"),
                 )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
@@ -9397,6 +9398,7 @@ class GatewayRunner:
                 model=_resolve_gateway_model(user_config) or None,
                 context_tokens=0,
                 context_length=None,
+                api_cost=0.0,
                 fields=effective.get("fields") or ["model", "context_pct", "cwd"],
             )
             if preview:

@@ -147,6 +147,44 @@ def test_format_footer_unknown_field_silently_ignored():
     assert out == "gpt-5.4 · 50%"
 
 
+def test_format_footer_api_cost():
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        context_tokens=50, context_length=100,
+        cwd="/x",
+        api_cost=0.0123,
+        fields=("model", "api_cost"),
+    )
+    assert out == "gpt-5.4 · ~$0.01"
+
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        context_tokens=50, context_length=100,
+        cwd="/x",
+        api_cost=0.0012,
+        fields=("model", "api_cost"),
+    )
+    assert out == "gpt-5.4 · ~$0.0012"
+
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        context_tokens=50, context_length=100,
+        cwd="/x",
+        api_cost=0.0,
+        fields=("model", "api_cost"),
+    )
+    assert out == "gpt-5.4 · $0.00"
+
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        context_tokens=50, context_length=100,
+        cwd="/x",
+        api_cost=None,
+        fields=("model", "api_cost"),
+    )
+    assert out == "gpt-5.4"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------

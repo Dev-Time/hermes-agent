@@ -95,6 +95,7 @@ def format_runtime_footer(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    api_cost: Optional[float] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
@@ -116,6 +117,13 @@ def format_runtime_footer(
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:
                 parts.append(rel)
+        elif field == "api_cost" and api_cost is not None:
+            if api_cost <= 0:
+                parts.append("$0.00")
+            elif api_cost < 0.01:
+                parts.append(f"~${api_cost:.4f}".rstrip("0").rstrip("."))
+            else:
+                parts.append(f"~${api_cost:.2f}")
         # Unknown field names are silently ignored.
 
     if not parts:
@@ -131,6 +139,7 @@ def build_footer_line(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    api_cost: Optional[float] = None,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
 
@@ -146,5 +155,6 @@ def build_footer_line(
         context_tokens=context_tokens,
         context_length=context_length,
         cwd=cwd,
+        api_cost=api_cost,
         fields=cfg.get("fields") or _DEFAULT_FIELDS,
     )
