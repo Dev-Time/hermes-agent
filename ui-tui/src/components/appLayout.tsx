@@ -288,7 +288,6 @@ const ComposerPane = memo(function ComposerPane({
                   onSubmit={composer.submit}
                   placeholder={composer.empty ? PLACEHOLDER : ui.busy ? 'Ctrl+C to interrupt…' : ''}
                   value={composer.input}
-                  voiceRecordKey={composer.voiceRecordKey}
                 />
               </Box>
 

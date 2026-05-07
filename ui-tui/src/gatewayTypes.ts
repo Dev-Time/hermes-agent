@@ -47,7 +47,7 @@ export type CommandDispatchResponse =
   | { output?: string; type: 'exec' | 'plugin' }
   | { target: string; type: 'alias' }
   | { message?: string; name: string; type: 'skill' }
-  | { message: string; notice?: string; type: 'send' }
+  | { message: string; type: 'send' }
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -75,14 +75,8 @@ export interface ConfigDisplayConfig {
   tui_statusbar?: 'bottom' | 'off' | 'on' | 'top' | boolean
 }
 
-export interface ConfigVoiceConfig {
-  // Raw `yaml.safe_load()` value from config; may be non-string if hand-edited.
-  // Callers must normalize/validate at runtime (parseVoiceRecordKey()).
-  record_key?: unknown
-}
-
 export interface ConfigFullResponse {
-  config?: { display?: ConfigDisplayConfig; voice?: ConfigVoiceConfig }
+  config?: { display?: ConfigDisplayConfig }
 }
 
 export interface ConfigMtimeResponse {
@@ -174,10 +168,6 @@ export interface SessionUsageResponse {
   model?: string
   output?: number
   total?: number
-}
-
-export interface SessionStatusResponse {
-  output?: string
 }
 
 export interface SessionCompressResponse {
@@ -289,7 +279,6 @@ export interface VoiceToggleResponse {
   available?: boolean
   details?: string
   enabled?: boolean
-  record_key?: string
   stt_available?: boolean
   tts?: boolean
 }
@@ -313,10 +302,7 @@ export interface ToolsConfigureResponse {
 // ── Model picker ─────────────────────────────────────────────────────
 
 export interface ModelOptionProvider {
-  auth_type?: string
-  authenticated?: boolean
   is_current?: boolean
-  key_env?: string
   models?: string[]
   name: string
   slug: string
@@ -507,7 +493,6 @@ export type GatewayEvent =
   | { payload: { request_id: string }; session_id?: string; type: 'sudo.request' }
   | { payload: { env_var: string; prompt: string; request_id: string }; session_id?: string; type: 'secret.request' }
   | { payload: { task_id: string; text: string }; session_id?: string; type: 'background.complete' }
-  | { payload?: { text?: string }; session_id?: string; type: 'review.summary' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.spawn_requested' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.start' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.thinking' }

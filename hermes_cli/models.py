@@ -40,7 +40,6 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("anthropic/claude-sonnet-4.5",     ""),
     ("anthropic/claude-haiku-4.5",      ""),
     ("openrouter/elephant-alpha",       "free"),
-    ("openrouter/owl-alpha",            "free"),
     ("openai/gpt-5.5",                  ""),
     ("openai/gpt-5.4-mini",             ""),
     ("xiaomi/mimo-v2.5-pro",             ""),
@@ -61,14 +60,12 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("z-ai/glm-5v-turbo",               ""),
     ("z-ai/glm-5-turbo",                ""),
     ("x-ai/grok-4.20",                  ""),
-    ("x-ai/grok-4.3",                   ""),
     ("nvidia/nemotron-3-super-120b-a12b",      ""),
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
     ("arcee-ai/trinity-large-preview:free", "free"),
     ("arcee-ai/trinity-large-thinking",  ""),
     ("openai/gpt-5.5-pro",              ""),
     ("openai/gpt-5.4-nano",             ""),
-    ("deepseek/deepseek-v4-pro",        ""),
 ]
 
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
@@ -183,12 +180,10 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "z-ai/glm-5v-turbo",
         "z-ai/glm-5-turbo",
         "x-ai/grok-4.20-beta",
-        "x-ai/grok-4.3",
         "nvidia/nemotron-3-super-120b-a12b",
         "arcee-ai/trinity-large-thinking",
         "openai/gpt-5.5-pro",
         "openai/gpt-5.4-nano",
-        "deepseek/deepseek-v4-pro",
     ],
     # Native OpenAI Chat Completions (api.openai.com). Used by /model counts and
     # provider_model_ids fallback when /v1/models is unavailable.
@@ -778,6 +773,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("nous",           "Nous Portal",              "Nous Portal (Nous Research subscription)"),
     ProviderEntry("openrouter",     "OpenRouter",               "OpenRouter (100+ models, pay-per-use)"),
     ProviderEntry("lmstudio",       "LM Studio",                "LM Studio (local desktop app with built-in model server)"),
+    ProviderEntry("ai-gateway",     "Vercel AI Gateway",        "Vercel AI Gateway (200+ models, $5 free credit, no markup)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models — API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex"),
     ProviderEntry("xiaomi",         "Xiaomi MiMo",              "Xiaomi MiMo (MiMo-V2.5 and V2 models — pro, omni, flash)"),
@@ -807,27 +803,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("opencode-go",    "OpenCode Go",              "OpenCode Go (open models, $10/month subscription)"),
     ProviderEntry("bedrock",        "AWS Bedrock",              "AWS Bedrock (Claude, Nova, Llama, DeepSeek — IAM or API key)"),
     ProviderEntry("azure-foundry",  "Azure Foundry",            "Azure Foundry (OpenAI-style or Anthropic-style endpoint — your Azure AI deployment)"),
-    ProviderEntry("ai-gateway",     "Vercel AI Gateway",        "Vercel AI Gateway"),
 ]
-
-# Auto-extend CANONICAL_PROVIDERS with any provider registered in providers/
-# that is not already in the list above.  Adding plugins/model-providers/<name>/
-# is sufficient to expose a new provider in the model picker, /model, and all
-# downstream consumers — no edits to this file needed.
-_canonical_slugs = {p.slug for p in CANONICAL_PROVIDERS}
-try:
-    from providers import list_providers as _list_providers_for_canonical
-    for _pp in _list_providers_for_canonical():
-        if _pp.name in _canonical_slugs:
-            continue
-        if _pp.auth_type in ("oauth_device_code", "oauth_external", "external_process", "aws_sdk", "copilot"):
-            continue  # non-api-key flows need bespoke picker UX; skip auto-inject
-        _label = _pp.display_name or _pp.name
-        _desc = _pp.description or f"{_label} (direct API)"
-        CANONICAL_PROVIDERS.append(ProviderEntry(_pp.name, _label, _desc))
-        _canonical_slugs.add(_pp.name)
-except Exception:
-    pass
 
 # Derived dicts — used throughout the codebase
 _PROVIDER_LABELS = {p.slug: p.label for p in CANONICAL_PROVIDERS}
@@ -1763,20 +1739,10 @@ def model_supports_fast_mode(model_id: Optional[str]) -> bool:
 
 
 def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
-    """Return True if the model is a Claude model eligible for Anthropic Fast Mode.
-
-    Fast mode is currently supported on Claude Opus 4.6 only. Per Anthropic's
-    docs (https://platform.claude.com/docs/en/build-with-claude/fast-mode):
-    "Fast mode is currently supported on Opus 4.6 only. Sending speed: fast
-    with an unsupported model returns an error." Opus 4.7 explicitly rejects
-    the ``speed`` parameter with HTTP 400.
-    """
+    """Return True if the model is a Claude model eligible for Anthropic Fast Mode."""
     raw = _strip_vendor_prefix(str(model_id or ""))
     base = raw.split(":")[0]
-    if not base.startswith("claude-"):
-        return False
-    # Only Opus 4.6 supports fast mode at present.
-    return "opus-4-6" in base or "opus-4.6" in base
+    return base.startswith("claude-")
 
 
 def resolve_fast_mode_overrides(model_id: Optional[str]) -> dict[str, Any] | None:
@@ -2046,34 +2012,6 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                 return ids
         except Exception:
             pass
-
-    # ── Profile-based generic live fetch (all simple api-key providers) ──
-    # Handles any provider registered in providers/ with auth_type="api_key".
-    # Replaces per-provider copy-paste blocks (stepfun, gmi, zai, etc.).
-    try:
-        from providers import get_provider_profile
-        from hermes_cli.auth import resolve_api_key_provider_credentials
-
-        _p = get_provider_profile(normalized)
-        if _p and _p.auth_type == "api_key" and _p.base_url:
-            try:
-                creds = resolve_api_key_provider_credentials(normalized)
-                api_key = str(creds.get("api_key") or "").strip()
-                base_url = str(creds.get("base_url") or "").strip()
-            except Exception:
-                api_key, base_url = "", _p.base_url
-            if not base_url:
-                base_url = _p.base_url
-            if api_key:
-                live = _p.fetch_models(api_key=api_key)
-                if live:
-                    return live
-            # Use profile's fallback_models if defined
-            if _p.fallback_models:
-                return list(_p.fallback_models)
-    except Exception:
-        pass
-
     curated_static = list(_PROVIDER_MODELS.get(normalized, []))
     if normalized in _MODELS_DEV_PREFERRED:
         return _merge_with_models_dev(normalized, curated_static)
@@ -2957,19 +2895,6 @@ def fetch_api_models(
 _OLLAMA_CLOUD_CACHE_TTL = 3600  # 1 hour
 
 
-def _strip_ollama_cloud_suffix(model_id: str) -> str:
-    """Strip :cloud / -cloud suffixes that models.dev appends to Ollama Cloud IDs.
-
-    The live API uses clean IDs (e.g. 'kimi-k2.6') while models.dev sometimes
-    returns them as 'kimi-k2.6:cloud'. Normalising before the dedup merge
-    prevents duplicate entries in the merged model list.
-    """
-    for suffix in (":cloud", "-cloud"):
-        if model_id.endswith(suffix):
-            return model_id[: -len(suffix)]
-    return model_id
-
-
 def _ollama_cloud_cache_path() -> Path:
     """Return the path for the Ollama Cloud model cache."""
     from hermes_constants import get_hermes_home
@@ -3065,10 +2990,9 @@ def fetch_ollama_cloud_models(
                 seen.add(m)
                 merged.append(m)
         for m in mdev_models:
-            normalized = _strip_ollama_cloud_suffix(m)
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                merged.append(normalized)
+            if m and m not in seen:
+                seen.add(m)
+                merged.append(m)
         if merged:
             _save_ollama_cloud_cache(merged)
             return merged
@@ -3162,7 +3086,7 @@ def validate_requested_model(
             "message": f"Model `{requested}` was not found in LM Studio's model listing.",
         }
 
-    if normalized == "custom" or normalized.startswith("custom:"):
+    if normalized == "custom":
         # Try probing with correct auth for the api_mode.
         if api_mode == "anthropic_messages":
             probe = probe_api_models(api_key, base_url, api_mode=api_mode)
@@ -3260,12 +3184,11 @@ def validate_requested_model(
             if suggestions:
                 suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
             return {
-                "accepted": True,
-                "persist": True,
+                "accepted": False,
+                "persist": False,
                 "recognized": False,
                 "message": (
-                    f"Note: `{requested}` was not found in the OpenAI Codex model listing. "
-                    "It may still work if your ChatGPT/Codex account has access to a newer or hidden model ID."
+                    f"Model `{requested}` was not found in the OpenAI Codex model listing."
                     f"{suggestion_text}"
                 ),
             }

@@ -19,8 +19,6 @@ import unicodedata
 from typing import Optional
 from hermes_cli.config import cfg_get
 
-from utils import is_truthy_value
-
 logger = logging.getLogger(__name__)
 
 # Per-thread/per-task gateway session identity.
@@ -94,20 +92,10 @@ _HERMES_ENV_PATH = (
 )
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
 _PROJECT_CONFIG_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*config\.yaml)'
-_SHELL_RC_FILES = (
-    r'(?:~|\$home|\$\{home\})/\.'
-    r'(?:bashrc|zshrc|profile|bash_profile|zprofile)\b'
-)
-_CREDENTIAL_FILES = (
-    r'(?:~|\$home|\$\{home\})/\.'
-    r'(?:netrc|pgpass|npmrc|pypirc)\b'
-)
 _SENSITIVE_WRITE_TARGET = (
     r'(?:/etc/|/dev/sd|'
     rf'{_SSH_SENSITIVE_PATH}|'
-    rf'{_HERMES_ENV_PATH}|'
-    rf'{_SHELL_RC_FILES}|'
-    rf'{_CREDENTIAL_FILES})'
+    rf'{_HERMES_ENV_PATH})'
 )
 _PROJECT_SENSITIVE_WRITE_TARGET = rf'(?:{_PROJECT_ENV_PATH}|{_PROJECT_CONFIG_PATH})'
 _COMMAND_TAIL = r'(?:\s*(?:&&|\|\||;).*)?$'
@@ -412,8 +400,8 @@ def unregister_gateway_notify(session_key: str) -> None:
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
-    for entry in entries:
-        entry.event.set()
+        for entry in entries:
+            entry.event.set()
 
 
 def resolve_gateway_approval(session_key: str, choice: str,
@@ -487,12 +475,7 @@ def clear_session(session_key: str) -> None:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
-        entries = _gateway_queues.pop(session_key, [])
-    for entry in entries:
-        # Session-boundary cleanup should cancel any blocked approval waits
-        # immediately so the old run can unwind instead of idling until timeout.
-        entry.result = "deny"
-        entry.event.set()
+        _gateway_queues.pop(session_key, None)
 
 
 def is_session_yolo_enabled(session_key: str) -> bool:
@@ -628,18 +611,15 @@ def prompt_dangerous_approval(command: str, description: str,
 
     os.environ["HERMES_SPINNER_PAUSE"] = "1"
     try:
-        # Resolve the active UI language once per prompt so we don't re-read
-        # config/YAML inside the retry loop below.
-        from agent.i18n import t
         while True:
             print()
-            print(f"  {t('approval.dangerous_header', description=description)}")
+            print(f"  ⚠️  DANGEROUS COMMAND: {description}")
             print(f"      {command}")
             print()
             if allow_permanent:
-                print(t("approval.choose_long"))
+                print("      [o]nce  |  [s]ession  |  [a]lways  |  [d]eny")
             else:
-                print(t("approval.choose_short"))
+                print("      [o]nce  |  [s]ession  |  [d]eny")
             print()
             sys.stdout.flush()
 
@@ -647,7 +627,7 @@ def prompt_dangerous_approval(command: str, description: str,
 
             def get_input():
                 try:
-                    prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
+                    prompt = "      Choice [o/s/a/D]: " if allow_permanent else "      Choice [o/s/D]: "
                     result["choice"] = input(prompt).strip().lower()
                 except (EOFError, OSError):
                     result["choice"] = ""
@@ -657,28 +637,28 @@ def prompt_dangerous_approval(command: str, description: str,
             thread.join(timeout=timeout_seconds)
 
             if thread.is_alive():
-                print("\n" + t("approval.timeout"))
+                print("\n      ⏱ Timeout - denying command")
                 return "deny"
 
             choice = result["choice"]
             if choice in ('o', 'once'):
-                print(t("approval.allowed_once"))
+                print("      ✓ Allowed once")
                 return "once"
             elif choice in ('s', 'session'):
-                print(t("approval.allowed_session"))
+                print("      ✓ Allowed for this session")
                 return "session"
             elif choice in ('a', 'always'):
                 if not allow_permanent:
-                    print(t("approval.allowed_session"))
+                    print("      ✓ Allowed for this session")
                     return "session"
-                print(t("approval.allowed_always"))
+                print("      ✓ Added to permanent allowlist")
                 return "always"
             else:
-                print(t("approval.denied"))
+                print("      ✗ Denied")
                 return "deny"
 
     except (EOFError, KeyboardInterrupt):
-        print("\n" + t("approval.cancelled"))
+        print("\n      ✗ Cancelled")
         return "deny"
     finally:
         if "HERMES_SPINNER_PAUSE" in os.environ:
@@ -817,7 +797,7 @@ def check_dangerous_command(command: str, env_type: str,
 
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
-    if is_truthy_value(os.getenv("HERMES_YOLO_MODE")) or is_current_session_yolo_enabled():
+    if os.getenv("HERMES_YOLO_MODE") or is_current_session_yolo_enabled():
         return {"approved": True, "message": None}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
@@ -942,7 +922,7 @@ def check_all_command_guards(command: str, env_type: str,
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    if is_truthy_value(os.getenv("HERMES_YOLO_MODE")) or is_current_session_yolo_enabled() or approval_mode == "off":
+    if os.getenv("HERMES_YOLO_MODE") or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
     is_cli = os.getenv("HERMES_INTERACTIVE")

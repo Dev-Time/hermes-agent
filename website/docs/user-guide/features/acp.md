@@ -67,24 +67,18 @@ Hermes logs to stderr so stdout remains reserved for ACP JSON-RPC traffic.
 
 ### VS Code
 
-Install the [ACP Client](https://marketplace.visualstudio.com/items?itemName=formulahendry.acp-client) extension.
+Install an ACP client extension, then point it at the repo's `acp_registry/` directory.
 
-To connect:
-
-1. Open the ACP Client panel from the Activity Bar.
-2. Select **Hermes Agent** from the built-in agent list.
-3. Connect and start chatting.
-
-If you want to define Hermes manually, add it through VS Code settings under `acp.agents`:
+Example settings snippet:
 
 ```json
 {
-  "acp.agents": {
-    "Hermes Agent": {
-      "command": "hermes",
-      "args": ["acp"]
+  "acpClient.agents": [
+    {
+      "name": "hermes-agent",
+      "registryDir": "/path/to/hermes-agent/acp_registry"
     }
-  }
+  ]
 }
 ```
 

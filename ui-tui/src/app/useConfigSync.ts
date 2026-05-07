@@ -7,11 +7,6 @@ import type {
   ConfigMtimeResponse,
   ReloadMcpResponse
 } from '../gatewayTypes.js'
-import {
-  DEFAULT_VOICE_RECORD_KEY,
-  parseVoiceRecordKey,
-  type ParsedVoiceRecordKey
-} from '../lib/platform.js'
 import { asRpcResult } from '../lib/rpc.js'
 
 import {
@@ -94,47 +89,10 @@ const quietRpc = async <T extends Record<string, any> = Record<string, any>>(
   }
 }
 
-const _voiceRecordKeyFromConfig = (cfg: ConfigFullResponse | null): ParsedVoiceRecordKey => {
-  const raw = cfg?.config?.voice?.record_key
-
-  return raw ? parseVoiceRecordKey(raw) : DEFAULT_VOICE_RECORD_KEY
-}
-
-/** Fetch ``config.get full`` and fan the result through ``applyDisplay``.
- *
- * Extracted so the mtime-reload path can be exercised by the test
- * suite without a React runtime (Copilot round-12 review on #19835).
- * Both the initial hydration and the mtime poller use this shared
- * helper, so a regression in the fetch/apply plumbing now fails the
- * useConfigSync tests instead of only being visible at runtime. */
-export async function hydrateFullConfig(
-  gw: GatewayClient,
-  setBell: (v: boolean) => void,
-  setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void
-): Promise<ConfigFullResponse | null> {
-  const cfg = await quietRpc<ConfigFullResponse>(gw, 'config.get', { key: 'full' })
-  applyDisplay(cfg, setBell, setVoiceRecordKey)
-  return cfg
-}
-
-export const applyDisplay = (
-  cfg: ConfigFullResponse | null,
-  setBell: (v: boolean) => void,
-  setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void
-) => {
+export const applyDisplay = (cfg: ConfigFullResponse | null, setBell: (v: boolean) => void) => {
   const d = cfg?.config?.display ?? {}
 
   setBell(!!d.bell_on_complete)
-  // Only push the voice record key when the RPC actually returned a
-  // config payload. ``quietRpc()`` collapses failures to ``null``; if we
-  // reset the cached shortcut on every null we would clobber a custom
-  // binding after one transient RPC error until the next config edit
-  // (Copilot round-8 review on #19835). The mtime-poll loop advances
-  // ``mtimeRef`` before this call, so staying silent on null preserves
-  // the last-good state and lets the next successful poll refresh it.
-  if (setVoiceRecordKey && cfg) {
-    setVoiceRecordKey(_voiceRecordKeyFromConfig(cfg))
-  }
   patchUiState({
     busyInputMode: normalizeBusyInputMode(d.busy_input_mode),
     compact: !!d.tui_compact,
@@ -151,13 +109,7 @@ export const applyDisplay = (
   })
 }
 
-export function useConfigSync({
-  gw,
-  setBellOnComplete,
-  setVoiceEnabled,
-  setVoiceRecordKey,
-  sid
-}: UseConfigSyncOptions) {
+export function useConfigSync({ gw, setBellOnComplete, setVoiceEnabled, sid }: UseConfigSyncOptions) {
   const mtimeRef = useRef(0)
 
   useEffect(() => {
@@ -173,8 +125,8 @@ export function useConfigSync({
     quietRpc<ConfigMtimeResponse>(gw, 'config.get', { key: 'mtime' }).then(r => {
       mtimeRef.current = Number(r?.mtime ?? 0)
     })
-    void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
-  }, [gw, setBellOnComplete, setVoiceEnabled, setVoiceRecordKey, sid])
+    quietRpc<ConfigFullResponse>(gw, 'config.get', { key: 'full' }).then(r => applyDisplay(r, setBellOnComplete))
+  }, [gw, setBellOnComplete, setVoiceEnabled, sid])
 
   useEffect(() => {
     if (!sid) {
@@ -202,18 +154,17 @@ export function useConfigSync({
         quietRpc<ReloadMcpResponse>(gw, 'reload.mcp', { session_id: sid, confirm: true }).then(
           r => r && turnController.pushActivity('MCP reloaded after config change')
         )
-        void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
+        quietRpc<ConfigFullResponse>(gw, 'config.get', { key: 'full' }).then(r => applyDisplay(r, setBellOnComplete))
       })
     }, MTIME_POLL_MS)
 
     return () => clearInterval(id)
-  }, [gw, setBellOnComplete, setVoiceRecordKey, sid])
+  }, [gw, setBellOnComplete, sid])
 }
 
 export interface UseConfigSyncOptions {
   gw: GatewayClient
   setBellOnComplete: (v: boolean) => void
   setVoiceEnabled: (v: boolean) => void
-  setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void
   sid: null | string
 }
