@@ -2066,6 +2066,17 @@ def build_anthropic_kwargs(
             betas.extend(_OAUTH_ONLY_BETAS)
         betas.append(_FAST_MODE_BETA)
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
+    elif fast_mode and (base_url is None or _is_third_party_anthropic_endpoint(base_url)):
+        # For AnthropicBedrock clients (base_url is None) and other third-party
+        # endpoints, ensure common betas (like 1M) are preserved when fast_mode
+        # is requested but ignored/stripped.
+        betas = list(_common_betas_for_base_url(
+            base_url,
+            drop_context_1m_beta=drop_context_1m_beta,
+        ))
+        if _supports_fast_mode(model) and not _is_third_party_anthropic_endpoint(base_url):
+            betas.append(_FAST_MODE_BETA)
+        kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
 
