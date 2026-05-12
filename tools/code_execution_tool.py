@@ -397,7 +397,8 @@ def _call(tool_name, args):
 # execute_code's container_config keys (a subset of terminal_tool's; the create path fills the rest).
 _CONTAINER_CONFIG_DEFAULTS = (
     ("container_cpu", 1), ("container_memory", 5120), ("container_disk", 51200), ("container_persistent", True),
-    ("vercel_runtime", ""), ("docker_volumes", []), ("docker_run_as_host_user", False), ("docker_network", True),
+    ("vercel_runtime", ""), ("docker_volumes", []), ("docker_forward_env", []), ("docker_env", {}),
+    ("docker_run_as_host_user", False), ("docker_network", True),
 )
 
 
