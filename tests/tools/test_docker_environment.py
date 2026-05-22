@@ -9,7 +9,7 @@ from tools.environments import docker as docker_env
 
 
 def _mock_subprocess_run(monkeypatch):
-    """Mock subprocess.run to intercept docker run -d and docker version calls.
+    """Mock subprocess.run to intercept docker commands.
 
     Returns a list of captured (cmd, kwargs) tuples for inspection.
 
@@ -28,6 +28,11 @@ def _mock_subprocess_run(monkeypatch):
                 return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
             if cmd[1] == "run":
                 return subprocess.CompletedProcess(cmd, 0, stdout="fake-container-id\n", stderr="")
+            if cmd[1] == "ps":
+                # Orphan cleanup — no stale containers by default
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[1] == "rm":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(docker_env.subprocess, "run", _run)
@@ -1315,6 +1320,7 @@ def test_credential_mount_skipped_when_source_missing(monkeypatch, tmp_path, cap
     )
 
 
+
 # ── s6-overlay /init image handling (issue #34628) ────────────────
 
 
@@ -1488,3 +1494,53 @@ def test_extra_args_set_shm_size_helper():
     assert docker_env._extra_args_set_shm_size(None) is False
     # non-string entries must not crash (config.yaml can be malformed)
     assert docker_env._extra_args_set_shm_size([42, None, "--shm-size=1g"]) is True
+
+
+def test_orphaned_containers_cleaned_on_init(monkeypatch):
+    """On init, any stale hermes-* containers in Exited state should be removed."""
+    ps_result_ids = [
+        "deadbeef1234",
+        "cafebabe5678",
+    ]
+
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append((list(cmd) if isinstance(cmd, list) else cmd, kwargs))
+        if isinstance(cmd, list) and len(cmd) >= 2:
+            if cmd[1] == "ps":
+                # Return two stale hermes-* container IDs
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="\n".join(ps_result_ids) + "\n", stderr="",
+                )
+            if cmd[1] == "rm":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[1] == "run":
+                return subprocess.CompletedProcess(cmd, 0, stdout="fresh-container-id\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+
+    _make_dummy_env()
+
+    # Find the ps call with --filter name=^/hermes- (orphan scan)
+    ps_calls = [
+        c for c in calls
+        if isinstance(c[0], list)
+        and len(c[0]) >= 2
+        and c[0][1] == "ps"
+        and "--filter" in c[0]
+        and "name=^/hermes-" in c[0]
+    ]
+    assert len(ps_calls) >= 1, "orphan container scan should run on init"
+
+    # Find the rm call that removes the stale IDs
+    rm_calls = [
+        c for c in calls
+        if isinstance(c[0], list)
+        and len(c[0]) >= 2
+        and c[0][1] == "rm"
+        and all(orphan_id in c[0] for orphan_id in ps_result_ids)
+    ]
+    assert len(rm_calls) >= 1, "orphan containers should be force-removed on init"
