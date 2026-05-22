@@ -10,7 +10,7 @@ from tools.environments import docker as docker_env
 
 
 def _mock_subprocess_run(monkeypatch):
-    """Mock subprocess.run to intercept docker run -d and docker version calls.
+    """Mock subprocess.run to intercept docker commands.
 
     Returns a list of captured (cmd, kwargs) tuples for inspection.
     """
@@ -23,6 +23,11 @@ def _mock_subprocess_run(monkeypatch):
                 return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
             if cmd[1] == "run":
                 return subprocess.CompletedProcess(cmd, 0, stdout="fake-container-id\n", stderr="")
+            if cmd[1] == "ps":
+                # Orphan cleanup — no stale containers by default
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[1] == "rm":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(docker_env.subprocess, "run", _run)
@@ -514,3 +519,75 @@ def test_run_as_host_user_warns_and_skips_when_no_posix_ids(monkeypatch, caplog)
         "does not expose POSIX uid/gid" in rec.getMessage()
         for rec in caplog.records
     ), "expected a warning when POSIX ids are unavailable"
+
+
+# ── --rm auto-removal flag tests ──────────────────────────────────
+
+
+def test_docker_run_includes_rm_flag(monkeypatch):
+    """``--rm`` must be present in docker run args so containers auto-delete
+    when stopped — even if cleanup() is never called after a crash."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env()
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args = run_calls[0][0]
+
+    assert "--rm" in run_args, (
+        f"--rm should be in docker run args for auto-cleanup on stop: {run_args}"
+    )
+
+
+def test_orphaned_containers_cleaned_on_init(monkeypatch):
+    """On init, any stale hermes-* containers in Exited state should be removed."""
+    ps_result_ids = [
+        "deadbeef1234",
+        "cafebabe5678",
+    ]
+
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append((list(cmd) if isinstance(cmd, list) else cmd, kwargs))
+        if isinstance(cmd, list) and len(cmd) >= 2:
+            if cmd[1] == "version":
+                return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
+            if cmd[1] == "ps":
+                # Return two stale hermes-* container IDs
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="\n".join(ps_result_ids) + "\n", stderr="",
+                )
+            if cmd[1] == "rm":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[1] == "run":
+                return subprocess.CompletedProcess(cmd, 0, stdout="fresh-container-id\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+
+    _make_dummy_env()
+
+    # Find the ps call with --filter name=^/hermes- (orphan scan)
+    ps_calls = [
+        c for c in calls
+        if isinstance(c[0], list)
+        and len(c[0]) >= 2
+        and c[0][1] == "ps"
+        and "--filter" in c[0]
+        and "name=^/hermes-" in c[0]
+    ]
+    assert len(ps_calls) >= 1, "orphan container scan should run on init"
+
+    # Find the rm call that removes the stale IDs
+    rm_calls = [
+        c for c in calls
+        if isinstance(c[0], list)
+        and len(c[0]) >= 2
+        and c[0][1] == "rm"
+        and all(orphan_id in c[0] for orphan_id in ps_result_ids)
+    ]
+    assert len(rm_calls) >= 1, "orphan containers should be force-removed on init"

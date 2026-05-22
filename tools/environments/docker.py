@@ -504,11 +504,18 @@ class DockerEnvironment(BaseEnvironment):
         # /usr/local/bin is not in PATH (common on macOS gateway/service).
         self._docker_exe = find_docker() or "docker"
 
+        # Remove orphaned Hermes containers from previous runs that are in
+        # Exited state.  Best-effort — if the prune fails (e.g. daemon busy
+        # during startup) we log and proceed; the --rm flag on `docker run`
+        # prevents future orphans.  This handles the crash-before-cleanup case.
+        self._cleanup_orphaned_containers(self._docker_exe)
+
         # Start the container directly via `docker run -d`.
         container_name = f"hermes-{uuid.uuid4().hex[:8]}"
         run_cmd = [
             self._docker_exe, "run", "-d",
             "--init",           # tini/catatonit as PID 1 — reaps zombie children
+            "--rm",             # auto-delete container when it stops
             "--name", container_name,
             "-w", cwd,
             *all_run_args,
@@ -629,8 +636,41 @@ class DockerEnvironment(BaseEnvironment):
         logger.debug("Docker --storage-opt support: %s", _storage_opt_ok)
         return _storage_opt_ok
 
+    @staticmethod
+    def _cleanup_orphaned_containers(docker_exe: str) -> None:
+        """Best-effort removal of stopped Hermes containers from prior runs.
+
+        Queries for containers named ``hermes-*`` in ``exited`` state and
+        force-removes them.  Non-blocking — failures are logged at DEBUG
+        level so a busy daemon during startup doesn't block agent init.
+        """
+        try:
+            result = subprocess.run(
+                [docker_exe, "ps", "-a",
+                 "--filter", "name=^/hermes-",
+                 "--filter", "status=exited",
+                 "--format", "{{.ID}}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                ids = result.stdout.strip().splitlines()
+                subprocess.run(
+                    [docker_exe, "rm", "-f", *ids],
+                    capture_output=True, timeout=30,
+                )
+                if ids:
+                    logger.info("Pruned %d orphaned Hermes container(s)", len(ids))
+        except Exception:
+            logger.debug("Orphaned container prune skipped", exc_info=True)
+
     def cleanup(self):
-        """Stop and remove the container. Bind-mount dirs persist if persistent=True."""
+        """Stop and remove the container. Bind-mount dirs persist if persistent=True.
+
+        With ``--rm`` on ``docker run`` (set during ``__init__``), a ``docker stop``
+        causes Docker to auto-delete the container after it exits — no explicit
+        ``docker rm`` is required.  The fallback ``rm -f`` in this method is kept
+        as a safety net for ``docker stop`` timeouts.
+        """
         if self._container_id:
             try:
                 # Stop in background so cleanup doesn't block
