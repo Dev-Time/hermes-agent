@@ -195,6 +195,10 @@ scripts/out/
 # committed to the repo root. See the hermes-release skill.
 RELEASE_v*.md
 
+# Fork-specific: runtime state and config for ByteRover integration
+.gitnexus
+.gemini
+
 # Desktop demo-run scratch output (hermes writes demo/*.txt during recorded
 # walkthroughs). Throwaway artifacts, never part of the app.
 apps/desktop/demo/
