@@ -65,6 +65,12 @@ class OpenRouterTTSProvider(TTSProvider):
     def display_name(self) -> str:
         return "OpenRouter"
 
+    @property
+    def voice_compatible(self) -> bool:
+        """Gemini output is wrapped as WAV, so it's safe for voice-bubble
+        delivery — the gateway's pipeline converts it to Opus via ffmpeg."""
+        return True
+
     def _api_key(self) -> str:
         import os
 
