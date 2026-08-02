@@ -1330,15 +1330,7 @@ class DockerEnvironment(BaseEnvironment):
         )
         logger.info(f"Docker run_args: {all_run_args}")
 
-        # Resolve the docker executable once so it works even when
-        # /usr/local/bin is not in PATH (common on macOS gateway/service).
-        self._docker_exe = find_docker() or "docker"
 
-        # Remove orphaned Hermes containers from previous runs that are in
-        # Exited state.  Best-effort — if the prune fails (e.g. daemon busy
-        # during startup) we log and proceed; the --rm flag on `docker run`
-        # prevents future orphans.  This handles the crash-before-cleanup case.
-        self._cleanup_orphaned_containers(self._docker_exe)
         # Start the container directly via `docker run -d`.
         container_name = f"hermes-{uuid.uuid4().hex[:8]}"
         # Labels make hermes-created containers identifiable to:
