@@ -181,8 +181,7 @@ def _load_plugin_config() -> dict:
         return {}
     try:
         import yaml
-        with open(config_path) as f:
-            all_config = yaml.safe_load(f) or {}
+        all_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         return cfg_get(all_config, "plugins", "byterover", default={}) or {}
     except Exception:
         return {}
@@ -305,12 +304,13 @@ class ByteRoverMemoryProvider(MemoryProvider):
             import yaml
             existing = {}
             if config_path.exists():
-                with open(config_path) as f:
-                    existing = yaml.safe_load(f) or {}
+                existing = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
             existing.setdefault("plugins", {})
             existing["plugins"]["byterover"] = values
-            with open(config_path, "w") as f:
-                yaml.dump(existing, f, default_flow_style=False)
+            config_path.write_text(
+                yaml.dump(existing, default_flow_style=False),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
