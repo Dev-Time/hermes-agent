@@ -100,6 +100,10 @@ class OpenRouterTTSProvider(TTSProvider):
             ],
         }
 
+    def default_model(self) -> Optional[str]:
+        """Return the default model id (gemini-3.1-flash-tts-preview)."""
+        return DEFAULT_MODEL
+
     def synthesize(
         self,
         text: str,
