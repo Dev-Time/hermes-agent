@@ -69,10 +69,17 @@ class TestPluginTTSProviders:
         ``display_name`` and ``name`` only."""
         tts_registry.register_provider(_FakeTTSProvider(name="minimal"))
         rows = tools_config._plugin_tts_providers()
-        assert len(rows) == 1
-        assert rows[0]["name"] == "Minimal"  # display_name default
-        assert rows[0]["tts_provider"] == "minimal"
-        assert rows[0]["env_vars"] == []
+        found = next(
+            (r for r in rows if r.get("tts_plugin_name") == "minimal"),
+            None,
+        )
+        # NOTE: rows may also contain bundled in-tree TTS plugins (e.g. the
+        # OpenRouter backend), so we locate the injected one by name rather
+        # than asserting an exact count.
+        assert found is not None
+        assert found["name"] == "Minimal"  # display_name default
+        assert found["tts_provider"] == "minimal"
+        assert found["env_vars"] == []
 
 
 
@@ -94,8 +101,7 @@ class TestVisibleProvidersInjectsTTSPlugins:
 
         # Plugin row has tts_provider key for write-path compat
         plugin_rows = [r for r in visible if r.get("tts_plugin_name")]
-        assert len(plugin_rows) == 1
-        assert plugin_rows[0]["tts_provider"] == "cartesia"
+        assert any(r["tts_provider"] == "cartesia" for r in plugin_rows)
 
     def test_other_categories_unaffected_by_tts_plugins(self):
         """Registering a TTS plugin must not leak into the Image Generation
