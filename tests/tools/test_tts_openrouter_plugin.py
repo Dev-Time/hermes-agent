@@ -13,11 +13,13 @@ Covers the provider contract on the ABC and the plugin's registration hook:
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from plugins.tts.openrouter import (
+    DEFAULT_GEMINI_VOICE,
     DEFAULT_MODEL,
     DEFAULT_OPENROUTER_BASE_URL,
     DEFAULT_VOICE,
@@ -47,8 +49,13 @@ class TestSynthesize:
         import types
 
         fake_speech = MagicMock()
-        fake_speech.create.return_value.stream_to_file = MagicMock()
 
+        def _stream(path):
+            # Simulate the provider streaming raw audio bytes to disk:
+            # 200 bytes = 100 16-bit silent samples of raw PCM.
+            Path(path).write_bytes(b"\x00\x00" * 100)
+
+        fake_speech.create.return_value.stream_to_file = _stream
         captured = {}
 
         class _FakeAudio:
@@ -69,49 +76,67 @@ class TestSynthesize:
         return fake_speech, captured
 
     def test_synthesize_happy_path(self, provider, monkeypatch, tmp_path):
+        """Default model is Gemini: forced to pcm + a valid Gemini voice, and
+        the returned raw PCM is wrapped as WAV."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
         fake_speech, captured = self._fake_openai(monkeypatch)
 
         out = tmp_path / "out.mp3"
         result = provider.synthesize("hello", str(out))
 
-        assert result == str(out)
         # Client was pointed at OpenRouter (not api.openai.com).
         assert captured["base_url"] == DEFAULT_OPENROUTER_BASE_URL
         assert captured["api_key"] == "sk-or-test"
-        # Defaults applied.
         kwargs = fake_speech.create.call_args.kwargs
         assert kwargs["model"] == DEFAULT_MODEL
-        assert kwargs["voice"] == DEFAULT_VOICE
         assert kwargs["input"] == "hello"
-        assert kwargs["response_format"] == "mp3"
-        fake_speech.create.return_value.stream_to_file.assert_called_once_with(str(out))
+        assert kwargs["response_format"] == "pcm"
+        assert kwargs["voice"] == DEFAULT_GEMINI_VOICE
+        # Raw PCM wrapped as WAV; a .wav path is returned.
+        assert result.endswith(".wav")
+        wav = Path(result).read_bytes()
+        assert wav.startswith(b"RIFF") and wav[8:12] == b"WAVE"
+
+    def test_gemini_voice_falls_back_from_openai_voice(self, provider, monkeypatch, tmp_path):
+        """An OpenAI-style voice is invalid on Gemini; fall back to a Gemini voice."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        fake_speech, _ = self._fake_openai(monkeypatch)
+
+        out = tmp_path / "x.mp3"
+        provider.synthesize("hi", str(out), voice="alloy")
+        kwargs = fake_speech.create.call_args.kwargs
+        assert kwargs["response_format"] == "pcm"
+        assert kwargs["voice"] == DEFAULT_GEMINI_VOICE
 
     def test_synthesize_uses_overrides(self, provider, monkeypatch, tmp_path):
+        """Per-call voice/model/speed overrides win on a non-Gemini model."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
         fake_speech, _ = self._fake_openai(monkeypatch)
 
         out = tmp_path / "x.mp3"
         provider.synthesize(
             "hi", str(out),
-            voice="nova", model="google/gemini-3.1-flash-tts-preview", speed=1.5,
+            voice="nova", model="mistralai/voxtral-mini-tts-2603", speed=1.5,
         )
         kwargs = fake_speech.create.call_args.kwargs
         assert kwargs["voice"] == "nova"
-        assert kwargs["model"] == "google/gemini-3.1-flash-tts-preview"
+        assert kwargs["model"] == "mistralai/voxtral-mini-tts-2603"
         assert kwargs["speed"] == 1.5
+        assert kwargs["response_format"] == "mp3"
 
     @pytest.mark.parametrize(
         ["requested", "coerced"],
         [("ogg", "mp3"), ("opus", "mp3"), ("flac", "mp3"), ("wav", "wav"), ("mp3", "mp3")],
     )
     def test_format_coercion(self, provider, monkeypatch, tmp_path, requested, coerced):
-        """OpenRouter speech is MP3/PCM-native; opus/ogg/etc. coerce to mp3."""
+        """Non-Gemini models coerce opus/ogg/etc. to mp3 (wav/mp3 pass through)."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
         fake_speech, _ = self._fake_openai(monkeypatch)
 
         out = tmp_path / f"out.{requested}"
-        provider.synthesize("hi", str(out), format=requested)
+        provider.synthesize(
+            "hi", str(out), format=requested, model="mistralai/voxtral-mini-tts-2603",
+        )
         kwargs = fake_speech.create.call_args.kwargs
         assert kwargs["response_format"] == coerced
 
