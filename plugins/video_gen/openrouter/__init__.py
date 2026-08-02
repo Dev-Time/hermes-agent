@@ -1,337 +1,456 @@
 """OpenRouter video generation backend.
 
-OpenRouter fronts every major video model (Veo, Sora, Kling, Seedance, Wan, Hailuo, Grok
-Imagine, FLUX Video, …) behind one asynchronous API: ``POST /api/v1/videos`` → poll
-``GET /api/v1/videos/{id}`` → download ``GET /api/v1/videos/{id}/content`` with the
-bearer key. The catalog and each model's limits come live from ``GET /api/v1/videos/models``
-(public, no key), so new releases are selectable without a patch and a retired model drops
-out on its own. ``capabilities()`` reflects the *selected* model so the dynamic
-``video_generate`` schema advertises only what that model honours.
+Uses OpenRouter's dedicated async video endpoint::
 
-Docs: https://openrouter.ai/docs/guides/overview/multimodal/video-generation
+    POST /api/v1/videos        -> {id, polling_url, status}
+    GET  {polling_url}         -> {status: pending|in_progress|completed|failed, ...}
+    (download)                 -> unsigned_urls[0]  OR /api/v1/videos/{id}/content?index=0
+
+The model catalog is discovered live from ``GET /api/v1/videos/models``, so
+new video models appear (and retired ones disappear) without a patch. Each
+catalog entry advertises its own supported durations / resolutions / aspect
+ratios / audio / frame-image support, which map onto the provider's
+``capabilities()`` and per-model picker rows.
+
+Credentials reuse the agent's OpenRouter auth (``OPENROUTER_API_KEY`` env or
+the credential pool) via the shared runtime resolver — the same key the user
+already uses for chat. No extra account or billing setup.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from agent.video_gen_provider import VideoGenProvider, error_response, save_url_video, success_response
+from agent.video_gen_provider import (
+    DEFAULT_ASPECT_RATIO,
+    DEFAULT_RESOLUTION,
+    VideoGenProvider,
+    error_response,
+    save_url_video,
+    success_response,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "minimax/hailuo-3-max"
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-_CATALOG_TTL_S = 300.0
-_CATALOG_TIMEOUT_S = 10.0
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "canceled", "expired"})
-# Every value the API accepts (docs "Supported Resolutions / Aspect Ratios"); the union fallback
-# when the live catalog is unreachable. Heights drive nearest-match clamping.
-_RESOLUTION_HEIGHT = {"480p": 480, "540p": 540, "720p": 720, "768p": 768, "1080p": 1080, "1K": 1024, "2K": 1440, "4K": 2160}
-_ALL_ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9", "9:21")
-_MAX_REFERENCE_IMAGES = 3  # image references are accepted by every provider per the API schema
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Cheap, fast, text+image capable default for the picker.
+DEFAULT_MODEL = "google/veo-3.1-lite"
 
-# Offline snapshot so the picker/default work before the first successful catalog fetch.
-_FALLBACK_CATALOG: List[Dict[str, Any]] = [
-    {"id": DEFAULT_MODEL, "name": "MiniMax: Hailuo 3 Max", "supported_durations": list(range(5, 16)),
-     "supported_resolutions": ["768p", "480p"], "supported_aspect_ratios": ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
-     "supported_frame_images": ["first_frame", "last_frame"], "generate_audio": False, "seed": False,
-     "pricing_skus": {"duration_seconds_480p": "0.05", "duration_seconds_768p": "0.08"}},
-]
+# Cubit: how long to wait between poll attempts, and the hard cap on wall
+# time before we fail out (video jobs commonly run 30s-few minutes).
+_POLL_INTERVAL_S = 10.0
+_POLL_DEADLINE_S = 600.0
+
+_TERMINAL_STATUSES = {"completed", "failed", "error", "cancelled", "canceled"}
 
 
-def _price_label(skus: Any) -> str:
-    """Compact per-second price from ``pricing_skus`` (``$0.10/s`` or ``$0.05–0.28/s``); ``""`` when the
-    SKU shape is token- or megapixel-priced (Seedance, FLUX upscale) — a wrong number is worse than none."""
-    if not isinstance(skus, dict):
-        return ""
-    per_second: List[float] = []
-    for key, value in skus.items():
-        try:
-            amount = float(value)
-        except (TypeError, ValueError):
-            continue
-        if key.startswith("duration_seconds"):
-            per_second.append(amount)
-        elif key.startswith(("cents_per_second_output", "cents_per_video_output_second")):
-            per_second.append(amount / 100)
-    if not per_second:
-        return ""
-    lo, hi = min(per_second), max(per_second)
-    return f"${lo:.2f}/s" if lo == hi else f"${lo:.2f}–{hi:.2f}/s"
+def _openrouter_base_url() -> str:
+    import os
+
+    return (os.environ.get("OPENROUTER_VIDEO_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL).rstrip("/")
 
 
-def _ratio(value: Any) -> Optional[float]:
+def _resolve_credentials() -> Optional[Dict[str, str]]:
+    """Return ``{api_key, base_url}`` from the shared OpenRouter auth chain.
+
+    Mirrors how the image_gen/openrouter plugin resolves credentials so both
+    surfaces share the same key pool and env precedence. Returns None when no
+    key is available.
+    """
     try:
-        w, h = str(value).split(":")
-        return float(w) / float(h)
-    except (ValueError, ZeroDivisionError):
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(requested="openrouter")
+    except Exception as exc:  # noqa: BLE001 - never break availability
+        logger.debug("OpenRouter runtime resolution failed: %s", exc)
+        runtime = {}
+    api_key = str(runtime.get("api_key") or "").strip() if runtime else ""
+    if not api_key:
+        import os
+
+        api_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    base_url = str(runtime.get("base_url") or "").strip() if runtime else ""
+    if not base_url:
+        base_url = _openrouter_base_url()
+    if not api_key:
         return None
+    return {"api_key": api_key, "base_url": base_url.rstrip("/")}
 
 
-def _nearest(value: Any, supported: List[Any], height: Optional[Dict[str, int]] = None) -> Any:
-    """Closest supported value (durations by distance, resolutions by pixel height, aspect ratios by
-    numeric ratio); the request is otherwise a guaranteed 400 because the tool always sends a default
-    resolution/aspect ratio."""
-    if not supported or value in supported:
-        return value
-    if height is not None:
-        target = height.get(str(value))
-        if target is None:
-            return supported[0]
-        scored = [(abs(height[str(s)] - target), i, s) for i, s in enumerate(supported) if str(s) in height]
-        return min(scored)[2] if scored else supported[0]
-    if ":" in str(value):
-        target = _ratio(value)
-        if target is None:
-            return supported[0]
-        scored = [(abs(r - target), i, s) for i, s in enumerate(supported) if (r := _ratio(s)) is not None]
-        return min(scored)[2] if scored else supported[0]
-    try:
-        return min(supported, key=lambda s: (abs(int(s) - int(value)), s))
-    except (TypeError, ValueError):
-        return supported[0]
-
-
-def _is_generative(entry: Dict[str, Any]) -> bool:
-    """Text/image-to-video models declare durations; edit, upscale and avatar models (video/audio input)
-    do not and are outside the unified ``video_generate`` surface."""
-    return bool(entry.get("supported_durations"))
-
-
-def _entry_capabilities(entry: Dict[str, Any]) -> Dict[str, Any]:
-    durations = [int(d) for d in entry.get("supported_durations") or [] if isinstance(d, (int, float))]
+def _http_headers(api_key: str) -> Dict[str, str]:
     return {
-        "modalities": ["text", "image"] if entry.get("supported_frame_images") else ["text"],
-        "aspect_ratios": list(entry.get("supported_aspect_ratios") or _ALL_ASPECT_RATIOS),
-        "resolutions": list(entry.get("supported_resolutions") or _RESOLUTION_HEIGHT),
-        "max_duration": max(durations) if durations else 30, "min_duration": min(durations) if durations else 1,
-        "supports_audio": bool(entry.get("generate_audio")), "supports_negative_prompt": False,
-        "supports_seed": bool(entry.get("seed")), "supports_upscale": False,
-        "max_reference_images": _MAX_REFERENCE_IMAGES,
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
 
 
-def _image_part(url: str) -> Dict[str, Any]:
-    return {"type": "image_url", "image_url": {"url": url}}
+# ---------------------------------------------------------------------------
+# Live model catalog
+# ---------------------------------------------------------------------------
 
 
-def _acceptable_image_ref(value: str) -> bool:
-    """OpenRouter fetches the frame itself, so it needs a public HTTPS URL or an inline ``data:image/`` URL
-    (what the sandbox confinement chokepoint hands us for local files)."""
-    lowered = value.lower()
-    return lowered.startswith("https://") or lowered.startswith("data:image/")
+def _fetch_video_models() -> List[Dict[str, Any]]:
+    """Fetch ``GET /api/v1/videos/models`` (public — no auth required)."""
+    import requests
+
+    try:
+        resp = requests.get(f"{_openrouter_base_url()}/videos/models", timeout=30)
+        resp.raise_for_status()
+        return list((resp.json() or {}).get("data") or [])
+    except Exception as exc:  # noqa: BLE001 - catalog is best-effort
+        logger.debug("Could not fetch OpenRouter video models: %s", exc)
+        return []
 
 
-def _build_payload(
-    entry: Dict[str, Any], *, model: str, prompt: str, image_url: Optional[str], reference_image_urls: Optional[List[str]],
-    duration: Optional[int], aspect_ratio: str, resolution: str, audio: Optional[bool], seed: Optional[int],
-) -> Dict[str, Any]:
-    """Unified inputs → OpenRouter body, clamped to the model's live limits; unsupported toggles are dropped
-    rather than sent (the API 400s on ``seed``/``generate_audio`` for models that lack them)."""
-    payload: Dict[str, Any] = {"model": model, "prompt": prompt}
-    if aspect_ratio:
-        payload["aspect_ratio"] = _nearest(aspect_ratio, list(entry.get("supported_aspect_ratios") or []))
-    if resolution:
-        payload["resolution"] = _nearest(resolution, list(entry.get("supported_resolutions") or []), _RESOLUTION_HEIGHT)
-    if duration:
-        payload["duration"] = int(_nearest(int(duration), list(entry.get("supported_durations") or [])))
-    if image_url:
-        payload["frame_images"] = [{**_image_part(image_url), "frame_type": "first_frame"}]
-    if reference_image_urls:
-        payload["input_references"] = [_image_part(u) for u in reference_image_urls[:_MAX_REFERENCE_IMAGES]]
-    if audio is not None and entry.get("generate_audio"):
-        payload["generate_audio"] = bool(audio)
-    if seed is not None and entry.get("seed"):
-        payload["seed"] = int(seed)
-    return payload
+def _model_card(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Map one catalog entry onto a picker row + capability hints.
+
+    OpenRouter advertises per-model ``supported_durations``,
+    ``supported_resolutions``, ``supported_aspect_ratios``,
+    ``supported_frame_images``, ``generate_audio`` and ``pricing_skus``.
+    """
+    mid = entry.get("id") or ""
+    pricing = entry.get("pricing_skus") or {}
+    price_txt = _format_price(pricing)
+    modalities: List[str] = ["text"]
+    if entry.get("supported_frame_images"):
+        modalities.append("image")
+    durations = entry.get("supported_durations")
+    if durations and isinstance(durations, list):
+        max_duration = max(int(d) for d in durations if isinstance(d, (int, float)))
+    else:
+        max_duration = 15
+    return {
+        "id": mid,
+        "display": entry.get("name") or mid.split("/")[-1],
+        "speed": "~30s-several min",
+        "strengths": (entry.get("description") or "")[:140] or "OpenRouter video model",
+        "price": price_txt,
+        "modalities": modalities,
+        "max_duration": max_duration,
+    }
+
+
+def _format_price(pricing: Dict[str, Any]) -> str:
+    """Best-effort human price from a model's pricing_skus dict."""
+    if not pricing:
+        return ""
+    # Common shapes: {"duration_seconds": "0.13"} or {"cents_per_second_output": "28"}.
+    for key in (
+        "duration_seconds",
+        "cents_per_second_output",
+        "text_to_video_duration_seconds_720p",
+        "video_tokens",
+    ):
+        if key not in pricing:
+            continue
+        try:
+            numeric = float(pricing[key])
+        except (TypeError, ValueError):
+            continue
+        if numeric <= 0:
+            continue
+        if "cents_per_second" in key:
+            return f"${numeric / 100:.3f}/s"
+        if "tokens" in key:
+            return f"${numeric * 1000:.2f}/1k tokens"
+        return f"${numeric:.3f}/s"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Provider
+# ---------------------------------------------------------------------------
 
 
 class OpenRouterVideoGenProvider(VideoGenProvider):
-    """Every generative model on OpenRouter's video API, catalog and limits discovered live."""
+    """Text/image-to-video via OpenRouter's async /api/v1/videos endpoint."""
 
     name = "openrouter"
-    display_name = "OpenRouter"
-    _poll_interval_s = 10.0
-    _poll_deadline_s = 900.0
-    _request_timeout_s = 60.0
 
-    def __init__(self) -> None:
-        self._catalog_cache: Optional[Tuple[List[Dict[str, Any]], float]] = None
-
-    # ---- credentials / transport -------------------------------------------------------------
-    def _api_key(self) -> str:
-        return os.environ.get("OPENROUTER_API_KEY", "").strip()
-
-    def _base_url(self) -> str:
-        return (os.environ.get("OPENROUTER_BASE_URL", "").strip() or DEFAULT_BASE_URL).rstrip("/")
-
-    def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_key()}", "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/NousResearch/hermes-agent", "X-Title": "Hermes Agent"}
-
-    def _session(self) -> Any:
-        import requests
-        return requests.Session()
+    @property
+    def display_name(self) -> str:
+        return "OpenRouter"
 
     def is_available(self) -> bool:
-        return bool(self._api_key())
-
-    # ---- catalog -------------------------------------------------------------------------------
-    def _catalog(self) -> List[Dict[str, Any]]:
-        """Live ``/videos/models`` entries (public endpoint), cached per TTL; the snapshot when unreachable."""
-        if self._catalog_cache and time.monotonic() - self._catalog_cache[1] < _CATALOG_TTL_S:
-            return self._catalog_cache[0]
-        entries: List[Dict[str, Any]] = []
-        try:
-            import requests
-            response = requests.get(f"{self._base_url()}/videos/models", timeout=_CATALOG_TIMEOUT_S)
-            response.raise_for_status()
-            data = response.json().get("data")
-            entries = [e for e in (data if isinstance(data, list) else []) if isinstance(e, dict) and e.get("id")]
-        except Exception as exc:  # noqa: BLE001 — offline picker keeps working on the snapshot
-            logger.debug("OpenRouter video catalog unavailable: %s", exc)
-        if not entries:
-            return _FALLBACK_CATALOG
-        self._catalog_cache = (entries, time.monotonic())
-        return entries
-
-    def _entry(self, model_id: str) -> Dict[str, Any]:
-        """Catalog row for *model_id*; ``{}`` for an unknown id (request passes through unclamped so a
-        brand-new model works before our cache refreshes — the API validates)."""
-        return next((e for e in self._catalog() if e.get("id") == model_id), {})
-
-    def _configured_model(self) -> str:
-        try:
-            from hermes_cli.config import cfg_get, load_config
-            value = cfg_get(load_config(), "video_gen", "model")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not read video_gen.model: %s", exc)
-            value = None
-        return value.strip() if isinstance(value, str) and value.strip() else DEFAULT_MODEL
+        return _resolve_credentials() is not None
 
     def list_models(self) -> List[Dict[str, Any]]:
-        rows = []
-        for entry in self._catalog():
-            if not _is_generative(entry):
-                continue
-            caps = _entry_capabilities(entry)
-            extras = [f"{caps['min_duration']}-{caps['max_duration']}s", "/".join(caps["resolutions"])]
-            extras += ["audio"] if caps["supports_audio"] else []
-            extras += ["i2v"] if "image" in caps["modalities"] else []
-            rows.append({"id": entry["id"], "display": entry.get("name") or entry["id"], "strengths": ", ".join(extras),
-                         "price": _price_label(entry.get("pricing_skus")), "modalities": caps["modalities"],
-                         "min_duration": caps["min_duration"], "max_duration": caps["max_duration"]})
-        return rows
+        models = _fetch_video_models()
+        out: List[Dict[str, Any]] = []
+        for entry in models:
+            card = _model_card(entry)
+            if card["id"]:
+                out.append(card)
+        if not out:
+            # Fallback so the picker always shows something even when the
+            # catalog is unreachable.
+            out.append({
+                "id": DEFAULT_MODEL,
+                "display": "Veo 3.1 Lite",
+                "modalities": ["text", "image"],
+                "max_duration": 15,
+            })
+        return out
 
     def default_model(self) -> Optional[str]:
         return DEFAULT_MODEL
 
-    def capabilities(self) -> Dict[str, Any]:
-        """The selected model's live surface; the API-wide union when the id is unknown or the catalog is down.
-        ``supports_seed``/``supports_audio`` are per-model (Veo/Wan/Seedance: yes; Hailuo/Grok: no)."""
-        entry = self._entry(self._configured_model())
-        if entry:
-            return _entry_capabilities(entry)
-        return {"modalities": ["text", "image"], "aspect_ratios": list(_ALL_ASPECT_RATIOS),
-                "resolutions": list(_RESOLUTION_HEIGHT), "max_duration": 30, "min_duration": 1,
-                "supports_audio": True, "supports_negative_prompt": False, "supports_seed": True,
-                "supports_upscale": False, "max_reference_images": _MAX_REFERENCE_IMAGES}
-
     def get_setup_schema(self) -> Dict[str, Any]:
-        return {"name": "OpenRouter", "badge": "paid",
-                "tag": "Veo 3.1, Sora 2 Pro, Kling 3, Seedance 2, Wan 3, Hailuo 3, Grok Imagine & more — live catalog; "
-                       "text-to-video, image-to-video & reference-to-video; uses OPENROUTER_API_KEY",
-                "env_vars": [{"key": "OPENROUTER_API_KEY", "prompt": "OpenRouter API key", "url": "https://openrouter.ai/settings/keys"}]}
+        return {
+            "name": "OpenRouter",
+            "badge": "paid",
+            "tag": "Veo 3.1, Kling v3, Hailuo 3, Seedance 2.0, Wan 2.7, Sora 2 Pro — text & image-to-video via OPENROUTER_API_KEY",
+            "env_vars": [
+                {
+                    "key": "OPENROUTER_API_KEY",
+                    "prompt": "OpenRouter API key",
+                    "url": "https://openrouter.ai/keys",
+                },
+            ],
+        }
 
-    # ---- generation ----------------------------------------------------------------------------
-    def _poll(self, session: Any, job_id: str) -> Dict[str, Any]:
-        deadline = time.monotonic() + self._poll_deadline_s
-        url = f"{self._base_url()}/videos/{job_id}"
-        last_status = "unknown"
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "modalities": ["text", "image"],
+            "aspect_ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"],
+            "resolutions": ["480p", "540p", "720p", "1080p"],
+            "max_duration": 15,
+            "min_duration": 1,
+            "supports_audio": True,
+            "supports_negative_prompt": True,
+            "supports_seed": True,
+            "max_reference_images": 3,
+        }
+
+    # -- request plumbing ------------------------------------------------
+
+    def _submit(self, api_key: str, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST a video job; returns the submission dict {id, polling_url, status}."""
+        import requests
+
+        resp = requests.post(
+            f"{base_url}/videos",
+            headers=_http_headers(api_key),
+            json=payload,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _poll(
+        self, api_key: str, polling_url: str
+    ) -> Optional[Dict[str, Any]]:
+        """Poll until terminal. Returns the terminal status dict or None on timeout."""
+        deadline = time.monotonic() + _POLL_DEADLINE_S
+        import requests
+
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"video job {job_id} did not finish within {int(self._poll_deadline_s)}s (last status={last_status})")
-            response = session.get(url, headers=self._headers(), timeout=max(0.001, min(self._request_timeout_s, remaining)))
-            response.raise_for_status()
-            payload = response.json()
-            last_status = str(payload.get("status") or "").lower() or "unknown"
-            if last_status in _TERMINAL_STATUSES:
-                return payload
-            time.sleep(min(self._poll_interval_s, max(0.0, deadline - time.monotonic())))
+            resp = requests.get(polling_url, headers=_http_headers(api_key), timeout=60)
+            resp.raise_for_status()
+            body = resp.json()
+            status = (body or {}).get("status") or ""
+            if status in _TERMINAL_STATUSES:
+                return body
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "OpenRouter video job did not finish within %ss (last=%s)",
+                    int(_POLL_DEADLINE_S), status,
+                )
+                return None
+            time.sleep(_POLL_INTERVAL_S)
 
-    def _save_completed_video(self, job_id: str) -> str:
-        # The content endpoint is derived from our configured origin, never from ``unsigned_urls``: the
-        # bearer key must only ever be sent to the host the operator selected.
-        return str(save_url_video(f"{self._base_url()}/videos/{job_id}/content", prefix="openrouter",
-                                  headers=self._headers(), require_video_content_type=True))
+    def _download(self, api_key: str, base_url: str, terminal: Dict[str, Any], prefix: str) -> str:
+        """Resolve the final video URL and materialise it locally."""
+        unsigned = (terminal or {}).get("unsigned_urls") or []
+        url = unsigned[0] if unsigned else None
+
+        if not url:
+            # Fall back to the content endpoint: /api/v1/videos/{id}/content?index=0
+            job_id = (terminal or {}).get("id") or ""
+            if job_id:
+                url = f"{base_url}/videos/{job_id}/content?index=0"
+        if not url:
+            raise ValueError("OpenRouter returned no video URL in the terminal response")
+
+        try:
+            return str(save_url_video(url, prefix=prefix))
+        except Exception as exc:  # noqa: BLE001 - best-effort: return raw URL
+            logger.debug("Could not cache OpenRouter video locally (%s); returning URL", exc)
+            return url
+
+    # -- main entry ------------------------------------------------------
 
     def generate(
-        self, prompt: str, *, model: Optional[str] = None, image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None, duration: Optional[int] = None,
-        aspect_ratio: str = "16:9", resolution: str = "720p", negative_prompt: Optional[str] = None,
-        audio: Optional[bool] = None, seed: Optional[int] = None, **kwargs: Any,
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        image_url: Optional[str] = None,
+        reference_image_urls: Optional[List[str]] = None,
+        duration: Optional[int] = None,
+        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+        resolution: str = DEFAULT_RESOLUTION,
+        negative_prompt: Optional[str] = None,
+        audio: Optional[bool] = None,
+        seed: Optional[int] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        del negative_prompt, kwargs  # no top-level negative_prompt on this API; unknown kwargs are ignored per the ABC
+        creds = _resolve_credentials()
+        if not creds:
+            return error_response(
+                error=(
+                    "No OpenRouter credentials found. Set OPENROUTER_API_KEY "
+                    "(run `hermes tools` → Video Generation → OpenRouter), or "
+                    "add OpenRouter to your credential pool."
+                ),
+                error_type="missing_credentials",
+                provider=self.name,
+                prompt=prompt or "",
+            )
+
         prompt = (prompt or "").strip()
-        model_id = (model or "").strip() or self._configured_model()
-
-        def fail(error: str, error_type: str) -> Dict[str, Any]:
-            return error_response(error=error, error_type=error_type, provider=self.name, model=model_id, prompt=prompt,
-                                  aspect_ratio=aspect_ratio)
-
         if not prompt:
-            return fail("prompt is required", "invalid_request")
-        if not self._api_key():
-            return fail("OPENROUTER_API_KEY is not set", "missing_credentials")
-        image_url = (image_url or "").strip() or None
-        refs = [r.strip() for r in (reference_image_urls or []) if isinstance(r, str) and r.strip()]
-        for ref in ([image_url] if image_url else []) + refs:
-            if not _acceptable_image_ref(ref):
-                return fail("image inputs must be public HTTPS URLs or data:image/ URLs (OpenRouter fetches them itself)",
-                            "invalid_request")
+            return error_response(
+                error="prompt is required.",
+                error_type="missing_prompt",
+                provider=self.name,
+                prompt="",
+            )
 
-        entry = self._entry(model_id)
-        payload = _build_payload(entry, model=model_id, prompt=prompt, image_url=image_url, reference_image_urls=refs,
-                                 duration=duration, aspect_ratio=aspect_ratio, resolution=resolution, audio=audio, seed=seed)
-        session = self._session()
+        model_id = model or self.default_model() or ""
+
+        # Build the OpenRouter video payload. Field names follow the documented
+        # /api/v1/videos schema (see module docstring).
+        payload: Dict[str, Any] = {"model": model_id, "prompt": prompt}
+        if duration and duration > 0:
+            payload["duration"] = int(duration)
+        if aspect_ratio:
+            payload["aspect_ratio"] = aspect_ratio
+        if resolution:
+            payload["resolution"] = resolution
+        if seed is not None:
+            payload["seed"] = int(seed)
+        if audio is not None:
+            payload["generate_audio"] = bool(audio)
+
+        # Image-to-video: a single source image becomes the first frame.
+        if image_url:
+            images = [{
+                "type": "image_url",
+                "image_url": {"url": image_url},
+                "frame_type": "first_frame",
+            }]
+            for ref in (reference_image_urls or []):
+                if len(images) >= 2:
+                    break
+                images.append({
+                    "type": "image_url",
+                    "image_url": {"url": ref},
+                    "frame_type": "last_frame",
+                })
+            payload["frame_images"] = images
+            modality_used = "image"
+        else:
+            if reference_image_urls:
+                payload["input_references"] = [
+                    {"type": "image_url", "image_url": {"url": r}}
+                    for r in reference_image_urls
+                ]
+            modality_used = "text"
+
+        # Provider passthrough for negative_prompt (only some models accept it
+        # — run it through provider.options keyed as the model's provider slug).
+        if negative_prompt:
+            # Try a best-effort mapping of model id -> provider slug.
+            slug = model_id.split("/")[0] if "/" in model_id else model_id
+            payload.setdefault("provider", {}).setdefault("options", {}).setdefault(
+                slug, {}
+            ).setdefault("parameters", {})["negativePrompt"] = negative_prompt
+
         try:
-            submitted = session.post(f"{self._base_url()}/videos", headers=self._headers(), json=payload,
-                                     timeout=self._request_timeout_s)
-            if submitted.status_code >= 400:
-                detail = ""
-                try:
-                    detail = str((submitted.json().get("error") or {}).get("message") or "")
-                except Exception:  # noqa: BLE001 — non-JSON error body
-                    detail = ""
-                return fail(f"OpenRouter rejected the request (HTTP {submitted.status_code}): {detail or submitted.text[:300]}",
-                            "api_error")
-            job_id = str(submitted.json().get("id") or "").strip()
-            if not job_id:
-                return fail("OpenRouter submit response did not contain a job id", "api_error")
-            job = self._poll(session, job_id)
-            status = str(job.get("status") or "").lower()
-            if status != "completed":
-                return fail(str(job.get("error") or f"video job ended with status={status!r}"), "job_failed")
-            video_path = self._save_completed_video(job_id)
-        except Exception as exc:  # noqa: BLE001 — normalize transport/timeout failures for tool callers
-            logger.debug("OpenRouter video generation failed", exc_info=True)
-            return fail(f"OpenRouter video generation failed: {exc}", "api_error")
-        finally:
-            close = getattr(session, "close", None)
-            if callable(close):
-                close()
+            submission = self._submit(creds["api_key"], creds["base_url"], payload)
+        except Exception as exc:  # noqa: BLE001
+            return error_response(
+                error=f"OpenRouter video submission failed: {exc}",
+                error_type="api_error",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+            )
 
-        raw_usage = job.get("usage")
-        usage: Dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
-        extra: Dict[str, Any] = {"job_id": job_id, **({"cost": usage["cost"]} if usage.get("cost") is not None else {})}
+        job_id = (submission or {}).get("id") or ""
+        polling_url = (submission or {}).get("polling_url") or ""
+        if not polling_url or not job_id:
+            return error_response(
+                error="OpenRouter video submission returned no polling_url",
+                error_type="empty_response",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+            )
+
+        try:
+            terminal = self._poll(creds["api_key"], polling_url)
+        except Exception as exc:  # noqa: BLE001
+            return error_response(
+                error=f"OpenRouter video polling failed: {exc}",
+                error_type="api_error",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+            )
+        if terminal is None:
+            return error_response(
+                error=(
+                    f"OpenRouter video job {job_id} did not reach a terminal "
+                    f"state within {int(_POLL_DEADLINE_S)}s"
+                ),
+                error_type="timeout",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+            )
+
+        status = (terminal or {}).get("status") or ""
+        if status != "completed":
+            job_error = (terminal or {}).get("error") or ""
+            return error_response(
+                error=f"OpenRouter video job ended with status={status!r}: {job_error}",
+                error_type="job_failed",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+            )
+
+        try:
+            video_ref = self._download(
+                creds["api_key"], creds["base_url"], terminal, prefix=self.name
+            )
+        except Exception as exc:  # noqa: BLE001
+            return error_response(
+                error=f"OpenRouter video job succeeded but output could not be retrieved: {exc}",
+                error_type="empty_response",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+            )
+
         return success_response(
-            video=video_path, model=model_id, prompt=prompt, modality="image" if image_url else "text",
-            aspect_ratio=str(payload.get("aspect_ratio") or ""), duration=int(payload.get("duration") or 0),
-            provider=self.name, extra=extra)
+            video=video_ref,
+            model=model_id,
+            prompt=prompt,
+            modality=modality_used,
+            aspect_ratio=aspect_ratio,
+            duration=duration or 0,
+            provider=self.name,
+            extra={"job_id": job_id},
+        )
 
 
 def register(ctx) -> None:
