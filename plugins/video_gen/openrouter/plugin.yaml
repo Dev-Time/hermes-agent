@@ -1,0 +1,7 @@
+name: openrouter
+version: 1.0.0
+description: "OpenRouter video generation backend. Text-to-video, image-to-video (frame_images), and reference-to-video via the async POST /api/v1/videos endpoint. Model catalog discovered live from openrouter.ai; reuses the OPENROUTER_API_KEY already used for chat."
+author: NousResearch
+kind: backend
+requires_env:
+  - OPENROUTER_API_KEY
