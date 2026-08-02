@@ -38,17 +38,36 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 
 
 def _load_plugin_config() -> Dict[str, Any]:
-    """Read ``memory.byterover``; fall back to legacy ``memory.provider_config`` (early docs used it)."""
+    """Read ByteRover's config via the canonical loader.
+
+    Reads ``plugins.byterover`` (where :meth:`save_config` writes). For
+    compatibility with early docs/issues, also accepts the legacy
+    ``memory.byterover`` / ``memory.provider_config`` locations.
+    """
     try:
         from hermes_cli.config import load_config
-        memory_config = load_config().get("memory", {})
+
+        config = load_config()
+
+        plugin_config = config.get("plugins", {})
+        if isinstance(plugin_config, dict):
+            provider_config = plugin_config.get("byterover", {})
+            if isinstance(provider_config, dict) and provider_config:
+                return dict(provider_config)
+
+        memory_config = config.get("memory", {})
+        if not isinstance(memory_config, dict):
+            return {}
+
+        provider_config = memory_config.get("byterover", {})
+        if isinstance(provider_config, dict) and provider_config:
+            return dict(provider_config)
+
+        legacy_config = memory_config.get("provider_config", {})
+        if isinstance(legacy_config, dict):
+            return dict(legacy_config)
     except Exception:
         return {}
-    for key in ("byterover", "provider_config") if isinstance(memory_config, dict) else ():
-        block = memory_config.get(key, {})
-        if isinstance(block, dict) and (block or key == "provider_config"):
-            return dict(block)
-    return {}
 
 
 def _get_brv_cwd() -> Path:
@@ -149,7 +168,8 @@ class ByteRoverMemoryProvider(MemoryProvider):
             {"key": "curate_timeout", "description": "Timeout for brv curate (seconds)", "default": _CURATE_TIMEOUT},
         ]
     def save_config(self, values, hermes_home):
-        """Write config to config.yaml under memory.byterover."""
+        """Write config to config.yaml under plugins.byterover."""
+        from hermes_cli.config import atomic_config_write, read_user_config_raw
         from pathlib import Path
         config_path = Path(hermes_home) / "config.yaml"
 
@@ -166,15 +186,10 @@ class ByteRoverMemoryProvider(MemoryProvider):
                 pass
 
         try:
-            import yaml
-            existing = {}
-            if config_path.exists():
-                with open(config_path) as f:
-                    existing = yaml.safe_load(f) or {}
-            existing.setdefault("memory", {})
-            existing["memory"]["byterover"] = values
-            with open(config_path, "w") as f:
-                yaml.dump(existing, f, default_flow_style=False)
+            existing = read_user_config_raw(config_path) or {}
+            existing.setdefault("plugins", {})
+            existing["plugins"]["byterover"] = values
+            atomic_config_write(config_path, existing)
         except Exception:
             pass
 
