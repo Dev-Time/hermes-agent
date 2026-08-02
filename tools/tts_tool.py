@@ -2784,6 +2784,7 @@ def text_to_speech_tool(
     speed: Optional[float] = None,
     instructions: Optional[str] = None,
     provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -2811,6 +2812,10 @@ def text_to_speech_tool(
             from ``tts.providers.<name>``, or plugin-registered provider
             names.  When ``None`` (the default), the configured provider
             from ``tts.provider`` in config.yaml is used.
+        model: Optional per-call model override. When set, overrides the
+            configured ``tts.model`` for this call. Supported by plugin TTS
+            providers (e.g. OpenRouter) and built-ins that read tts.model.
+            When ``None`` (the default), the configured model is used.
 
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
@@ -2834,6 +2839,12 @@ def text_to_speech_tool(
         clamped = max(0.25, min(4.0, float(speed)))
         tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
         tts_config["speed"] = clamped
+
+    # Per-call model override: forward to providers that support it (plugin
+    # TTS providers and built-ins that read tts.model), mirroring `provider`.
+    if model:
+        tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
+        tts_config["model"] = str(model)
 
     # Allow per-call provider override; fall back to the configured default.
     if provider:
@@ -3857,6 +3868,15 @@ TTS_SCHEMA = {
                     "names from tts.providers.<name>, or plugin-registered names. "
                     "When omitted, the configured tts.provider from config.yaml is used."
                 )
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Optional per-call TTS model override. When set, uses this model "
+                    "for this call instead of the configured tts.model. Supported by "
+                    "plugin TTS providers (e.g. OpenRouter: google/gemini-3.1-flash-tts-preview, "
+                    "x-ai/grok-voice-tts-1.0). When omitted, the configured model is used."
+                )
             }
         },
         "required": ["text"]
@@ -3872,7 +3892,8 @@ registry.register(
         output_path=args.get("output_path"),
         speed=args.get("speed"),
         instructions=args.get("instructions"),
-        provider=args.get("provider")),
+        provider=args.get("provider"),
+        model=args.get("model")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )
