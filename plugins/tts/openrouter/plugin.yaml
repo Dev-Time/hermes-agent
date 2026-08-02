@@ -1,0 +1,7 @@
+name: openrouter
+version: 1.0.0
+description: "OpenRouter TTS backend (text-to-speech) via the OpenAI-compatible /api/v1/audio/speech endpoint. GPT-4o Mini TTS, Voxtral Mini, Gemini TTS and more; reuses the OPENROUTER_API_KEY already used for chat."
+author: NousResearch
+kind: backend
+requires_env:
+  - OPENROUTER_API_KEY
