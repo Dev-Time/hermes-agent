@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Defaults mirror the OpenRouter docs and the wizard preset.
-DEFAULT_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
+DEFAULT_MODEL = "google/gemini-3.1-flash-tts-preview"
 DEFAULT_VOICE = "alloy"
 
 # OpenRouter/TTS response formats we actually request. The speech endpoint is
