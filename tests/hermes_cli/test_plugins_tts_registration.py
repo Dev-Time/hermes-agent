@@ -109,10 +109,13 @@ class TestRegisterTTSProvider:
             mgr = PluginManager()
             mgr.discover_and_load()
 
-        # Plugin loaded (register returned normally), but registry empty.
+        # Plugin loaded (register returned normally), but the bad name not in
+        # registry. (Other bundled in-tree TTS plugins may also be present.)
         assert mgr._plugins["bad-tts-plugin"].enabled is True
         assert tts_registry.get_provider("not a provider") is None
-        assert tts_registry.list_providers() == []
+        assert all(
+            p.name != "not a provider" for p in tts_registry.list_providers()
+        )
         assert "does not inherit from TTSProvider" in caplog.text
 
         tts_registry._reset_for_tests()
@@ -151,6 +154,7 @@ class TestRegisterTTSProvider:
         # not an exception. The registry rejects the entry though.
         assert mgr._plugins["shadow-tts-plugin"].enabled is True
         assert tts_registry.get_provider("edge") is None
+        assert all(p.name != "edge" for p in tts_registry.list_providers())
         assert "shadows a built-in name" in caplog.text
 
         tts_registry._reset_for_tests()
