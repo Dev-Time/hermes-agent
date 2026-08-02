@@ -2782,6 +2782,8 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2795,6 +2797,15 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The 'model' and 'provider' parameters let the caller override the
+    subagent's model (and optionally its whole provider+credentials)
+    at call time, without editing config.yaml. 'model' alone swaps the
+    model name; 'provider' triggers full credential resolution for that
+    provider via the runtime provider system (same as
+    delegation.provider in config). Per-task model/provider in a batch
+    beats the top-level values. This is a fork-local extension, not part
+    of upstream delegation.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2858,6 +2869,10 @@ def delegate_task(
     # children inherit from the parent.
     try:
         creds = _resolve_delegation_credentials(cfg, parent_agent)
+        # Fork-local: apply a live model/provider override passed as a
+        # delegate_task argument (not config). Per-task overrides below
+        # beat this top-level value.
+        creds = _apply_dynamic_override(creds, model, provider)
     except ValueError as exc:
         return tool_error(str(exc))
 
@@ -2940,6 +2955,10 @@ def delegate_task(
         # Per-task role beats top-level; normalise again so unknown
         # per-task values warn and degrade to leaf uniformly.
         effective_role = _normalize_role(t.get("role") or top_role)
+        # Fork-local: per-task model/provider beat the top-level value.
+        task_creds = _apply_dynamic_override(
+            creds, t.get("model"), t.get("provider")
+        )
         child = _build_child_preserving_parent_tools(
             task_index=i,
             goal=t["goal"],
@@ -2947,18 +2966,18 @@ def delegate_task(
             # Subagents always inherit the parent's toolsets; the model
             # cannot choose or narrow them (no model-facing toolsets arg).
             toolsets=None,
-            model=creds["model"],
+            model=task_creds["model"],
             max_iterations=effective_max_iter,
             task_count=n_tasks,
             parent_agent=parent_agent,
-            override_provider=creds["provider"],
-            override_base_url=creds["base_url"],
-            override_api_key=creds["api_key"],
-            override_api_mode=creds["api_mode"],
-            override_request_overrides=creds.get("request_overrides"),
-            override_max_tokens=creds.get("max_output_tokens"),
-            override_acp_command=creds.get("command"),
-            override_acp_args=creds.get("args"),
+            override_provider=task_creds["provider"],
+            override_base_url=task_creds["base_url"],
+            override_api_key=task_creds["api_key"],
+            override_api_mode=task_creds["api_mode"],
+            override_request_overrides=task_creds.get("request_overrides"),
+            override_max_tokens=task_creds.get("max_output_tokens"),
+            override_acp_command=task_creds.get("command"),
+            override_acp_args=task_creds.get("args"),
             role=effective_role,
         )
         # Tee the child's progress events into its live transcript log.
@@ -3604,6 +3623,67 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _apply_dynamic_override(
+    creds: Dict[str, Any], model: Optional[str], provider: Optional[str]
+) -> Dict[str, Any]:
+    """Apply a per-call (dynamic) model/provider override onto a creds dict.
+
+    ``creds`` is the creds dict resolved from config via
+    :func:`_resolve_delegation_credentials`. This function applies a
+    live override supplied as a delegate_task argument:
+
+    - ``provider`` given -> resolve the full credential bundle for that
+      provider via the runtime provider system (same path as config-driven
+      ``delegation.provider``), replacing provider/base_url/api_key/api_mode.
+    - ``provider`` None but ``model`` given -> swap only the model name,
+      keeping the provider/credentials from ``creds``.
+
+    Function-local so it can also be applied per-task inside the batch loop,
+    where each task may carry its own ``model``/``provider`` override.
+    """
+    if not model and not provider:
+        return creds
+
+    if provider is not None:
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            runtime = resolve_runtime_provider(requested=provider, target_model=model)
+        except Exception as exc:  # noqa: BLE001 - surface a friendly error
+            raise ValueError(
+                f"Cannot resolve delegation provider '{provider}': {exc}. "
+                f"Check that the provider is configured (API key set, valid provider name), "
+                f"or set delegation.base_url/delegation.api_key for a direct endpoint."
+            ) from exc
+
+        api_key = str(runtime.get("api_key") or "").strip()
+        if not api_key:
+            raise ValueError(
+                f"Delegation provider '{provider}' resolved but has no API key. "
+                f"Set the appropriate environment variable or run 'hermes auth'."
+            )
+        merged = dict(creds)
+        merged.update(
+            {
+                "model": model or runtime.get("model") or None,
+                "provider": provider
+                if runtime.get("provider") == _RUNTIME_PROVIDER_CUSTOM
+                else runtime.get("provider"),
+                "base_url": runtime.get("base_url"),
+                "api_key": api_key,
+                "api_mode": runtime.get("api_mode"),
+                "command": runtime.get("command"),
+                "args": list(runtime.get("args") or []),
+            }
+        )
+        return merged
+
+    # model-only override: keep creds' provider/credentials, swap the model.
+    merged = dict(creds)
+    merged["model"] = model
+    return merged
+
+
 def _load_config() -> dict:
     """Load delegation config from the active Hermes config.
 
@@ -3752,7 +3832,7 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
-        "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
+        "- Subagent model is configurable per call (fork-local): pass 'model' (and optionally 'provider') to pick a live subagent model without editing config.yaml. Otherwise children inherit the parent model unless you pin delegation.provider / delegation.model in config.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -3881,6 +3961,14 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "string",
+                            "description": "Fork-local: per-task model override. Beats the top-level 'model'. See top-level 'model' for semantics.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Fork-local: per-task provider override. Beats the top-level 'provider'. See top-level 'provider' for semantics.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -3904,6 +3992,28 @@ DELEGATE_TASK_SCHEMA = {
                     "the work finishes; just continue working in the meantime. "
                     "Setting this has no effect; the parameter remains only for "
                     "backward compatibility."
+                ),
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Fork-local: override the model used by the subagent(s), "
+                    "at call time, without touching config.yaml. When "
+                    "'provider' is also given this is the model for that "
+                    "provider; when 'provider' is omitted, the model name is "
+                    "swapped on the current provider's credentials. Per-task "
+                    "'model' (inside 'tasks') beats this top-level value."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Fork-local: override the provider + full credentials for "
+                    "the subagent(s), resolved live via the runtime provider "
+                    "system (same as delegation.provider in config.yaml). Lets "
+                    "you fan out a batch across different providers/models "
+                    "without pre-configuring them. Per-task 'provider' (inside "
+                    "'tasks') beats this top-level value."
                 ),
             },
         },
