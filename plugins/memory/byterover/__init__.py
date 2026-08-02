@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
-from hermes_cli.config import cfg_get
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -63,16 +62,23 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 
 
 def _load_plugin_config() -> Dict[str, Any]:
-    """Read ByteRover's profile-scoped memory config.
+    """Read ByteRover's config via the canonical loader.
 
-    New memory-provider setup stores non-secret provider settings under
-    ``memory.<provider>``.  Some users also set ``memory.provider_config`` from
-    early docs/issues, so accept it as a compatibility fallback.
+    Reads ``plugins.byterover`` (where :meth:`save_config` writes). For
+    compatibility with early docs/issues, also accepts the legacy
+    ``memory.byterover`` / ``memory.provider_config`` locations.
     """
     try:
         from hermes_cli.config import load_config
 
         config = load_config()
+
+        plugin_config = config.get("plugins", {})
+        if isinstance(plugin_config, dict):
+            provider_config = plugin_config.get("byterover", {})
+            if isinstance(provider_config, dict) and provider_config:
+                return dict(provider_config)
+
         memory_config = config.get("memory", {})
         if not isinstance(memory_config, dict):
             return {}
@@ -174,20 +180,6 @@ def _get_brv_cwd() -> Path:
 # Config
 # ---------------------------------------------------------------------------
 
-def _load_plugin_config() -> dict:
-    from hermes_constants import get_hermes_home
-    config_path = get_hermes_home() / "config.yaml"
-    if not config_path.exists():
-        return {}
-    try:
-        import yaml
-        with open(config_path) as f:
-            all_config = yaml.safe_load(f) or {}
-        return cfg_get(all_config, "plugins", "byterover", default={}) or {}
-    except Exception:
-        return {}
-
-
 # ---------------------------------------------------------------------------
 # Tool schemas
 # ---------------------------------------------------------------------------
@@ -286,6 +278,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
         ]
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.byterover."""
+        from hermes_cli.config import atomic_config_write, read_user_config_raw
         from pathlib import Path
         config_path = Path(hermes_home) / "config.yaml"
 
@@ -302,15 +295,10 @@ class ByteRoverMemoryProvider(MemoryProvider):
                 pass
 
         try:
-            import yaml
-            existing = {}
-            if config_path.exists():
-                with open(config_path) as f:
-                    existing = yaml.safe_load(f) or {}
+            existing = read_user_config_raw(config_path) or {}
             existing.setdefault("plugins", {})
             existing["plugins"]["byterover"] = values
-            with open(config_path, "w") as f:
-                yaml.dump(existing, f, default_flow_style=False)
+            atomic_config_write(config_path, existing)
         except Exception:
             pass
 
