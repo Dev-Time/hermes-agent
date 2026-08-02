@@ -41,6 +41,10 @@ class TestAvailability:
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
         assert provider.is_available() is True
 
+    def test_voice_compatible(self, provider):
+        """Gemini output is WAV, so op-in to voice-bubble (Opus) delivery."""
+        assert provider.voice_compatible is True
+
 
 class TestSynthesize:
     def _fake_openai(self, monkeypatch):
