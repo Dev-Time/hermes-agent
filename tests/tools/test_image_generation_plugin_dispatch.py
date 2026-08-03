@@ -20,6 +20,7 @@ class _FakeCodexProvider(ImageGenProvider):
         return "codex"
 
     def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        self.last_kwargs = dict(kwargs or {})
         return {
             "success": True,
             "image": "/tmp/codex-test.png",
@@ -51,6 +52,29 @@ class TestPluginDispatch:
         assert payload["provider"] == "codex"
         assert payload["image"] == "/tmp/codex-test.png"
         assert payload["aspect_ratio"] == "square"
+
+    def test_model_override_beats_configured_model(self, monkeypatch, tmp_path):
+        """The per-call model override wins over image_gen.model for plugins."""
+        from tools import image_generation_tool
+        from agent import image_gen_registry as registry_module
+        from hermes_cli import plugins as plugins_module
+
+        fake = _FakeCodexProvider()
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text("image_gen:\n  provider: codex\n")
+        image_gen_registry.register_provider(fake)
+
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "codex")
+        monkeypatch.setattr(
+            image_generation_tool, "_read_configured_image_model", lambda: "config-model"
+        )
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda: None)
+        monkeypatch.setattr(registry_module, "get_provider", lambda name: fake)
+
+        image_generation_tool._dispatch_to_plugin_provider(
+            "draw cat", "square", model="per-call-model",
+        )
+        assert fake.last_kwargs.get("model") == "per-call-model"
 
 
     def test_deepinfra_key_alone_does_not_select_image_backend(self, monkeypatch):

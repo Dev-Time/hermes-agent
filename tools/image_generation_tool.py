@@ -185,8 +185,13 @@ def _plugin_provider_name() -> Optional[str]:
     return configured
 
 
-def _resolve_fal_model() -> tuple:
-    """Return ``(model_id, meta)`` for the configured FAL model, falling back to DEFAULT_MODEL (warned) when unknown."""
+def _resolve_fal_model(model_override: Optional[str] = None) -> tuple:
+    """Return ``(model_id, meta)`` for the configured FAL model, falling back to DEFAULT_MODEL (warned) when unknown.
+
+    ``model_override`` (per-call) wins over config when it names a known model in the catalog.
+    """
+    if model_override and model_override in FAL_MODELS:
+        return model_override, FAL_MODELS[model_override]
     # FAL_IMAGE_MODEL is an undocumented escape hatch (backward-compat for tests/scripts).
     model_id = _read_image_gen_key("model") or os.getenv("FAL_IMAGE_MODEL", "").strip()
     if model_id and model_id not in FAL_MODELS:
@@ -408,14 +413,16 @@ def image_generate_tool(
     num_inference_steps: Optional[int] = None, guidance_scale: Optional[float] = None,
     num_images: Optional[int] = None, output_format: Optional[str] = None,
     seed: Optional[int] = None, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None) -> str:
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
+    model: Optional[str] = None) -> str:
     """Generate (or, with source images + an ``edit_endpoint`` model, edit) an image via FAL.
 
     Extra kwargs are overrides filtered per-model via ``supports`` / ``edit_supports`` (dropped
-    silently so callers survive model switches). Returns JSON ``{"success", "image", "modality",
-    "error", "error_type"}``.
+    silently so callers survive model switches). ``model`` selects a specific model from the
+    catalog for this call instead of the configured ``image_gen.model`` (fork-local). Returns
+    JSON ``{"success", "image", "modality", "error", "error_type"}``.
     """
-    model_id, meta = _resolve_fal_model()
+    model_id, meta = _resolve_fal_model(model_override=model)
     refs = reference_image_urls if isinstance(reference_image_urls, (list, tuple)) else []
     source_images = [c.strip() for c in (image_url, *refs) if isinstance(c, str) and c.strip()]
     use_edit = bool(source_images) and bool(meta.get("edit_endpoint"))
@@ -608,7 +615,8 @@ def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model
 
 def _dispatch_to_plugin_provider(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None):
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
+    model: Optional[str] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
     (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
     configured = _plugin_provider_name()
@@ -633,8 +641,9 @@ def _dispatch_to_plugin_provider(
     pname = getattr(provider, "name", "?")
     kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
     try:
+        # Per-call model override wins; else fall back to the configured model.
         _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
-                             model=_read_configured_image_model())
+                             model=model or _read_configured_image_model())
         result = provider.generate(**kwargs)
     except Exception as exc:
         # A TypeError from generate() predating image_url support (third-party plugin not yet
@@ -667,7 +676,8 @@ def _normalize_krea_model(model_id: Optional[str]) -> Optional[str]:
 
 def _maybe_route_managed_krea(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None) -> Optional[str]:
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
+    model: Optional[str] = None) -> Optional[str]:
     """JSON result from the managed Krea gateway, or ``None`` to fall through.
 
     Fires only for a native ``krea-2-*`` model with no ``image_gen.provider`` other than
@@ -676,7 +686,7 @@ def _maybe_route_managed_krea(
     configured_provider = _read_configured_image_provider()
     if configured_provider is not None and configured_provider != NOUS_MANAGED_PROVIDER:
         return None
-    normalized = _normalize_krea_model(_read_configured_image_model())
+    normalized = _normalize_krea_model(model or _read_configured_image_model())
     if normalized is None:
         return None
     try:
@@ -730,6 +740,7 @@ def _handle_image_generate(args, **kw):
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
     upscale = args.get("upscale")
+    model = args.get("model")
     task_id = kw.get("task_id")
     # Confinement chokepoint BEFORE any dispatch: every route receives sandbox-confined bytes.
     image_url, reference_image_urls, confine_error = _confine_source_images(
@@ -739,7 +750,8 @@ def _handle_image_generate(args, **kw):
     # Order matters: explicit plugin provider (incl. "krea"), then model-driven managed Krea
     # interception (only when no provider is set, so BYO/direct FAL stays untouched), then FAL.
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
-                   upscale=upscale if isinstance(upscale, bool) else None)
+                   upscale=upscale if isinstance(upscale, bool) else None,
+                   model=model if isinstance(model, str) else None)
     raw = None
     for route in (_dispatch_to_plugin_provider, _maybe_route_managed_krea, image_generate_tool):
         raw = route(prompt, aspect_ratio, **sources)
@@ -813,6 +825,16 @@ _UPSCALE_PARAM = {
     ),
 }
 
+_MODEL_PARAM = {
+    "type": "string",
+    "description": (
+        "Optional per-call model override. When set, uses this model for "
+        "this call instead of the configured image_gen.model. Only models "
+        "the active provider knows are accepted. When omitted, the "
+        "configured model is used."
+    ),
+}
+
 
 def _build_dynamic_image_schema() -> Dict[str, Any]:
     """Render description AND params from the active model's capabilities; args it cannot
@@ -847,6 +869,9 @@ def _build_dynamic_image_schema() -> Dict[str, Any]:
         edit_clause = " (text-to-image only — the active model cannot edit existing images)"
     if info.get("supports_upscale"):
         properties["upscale"] = _UPSCALE_PARAM
+    # Per-call model override (fork-local): provider-agnostic, always
+    # advertised — the handler accepts it from any model (replay compat).
+    properties["model"] = _MODEL_PARAM
     return {"description": base_desc.format(edit_clause=edit_clause),
             "parameters": {"type": "object", "properties": properties, "required": ["prompt"]}}
 
