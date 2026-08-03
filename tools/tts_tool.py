@@ -3147,11 +3147,35 @@ def _text_to_speech_single(
     instructions: Optional[str] = None,
     provider: Optional[str] = None,
     tts_config_override: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
 ) -> str:
     """Synthesize one provider-safe text chunk and return one final-encoded file.
 
     The public :func:`text_to_speech_tool` wrapper owns long-form splitting,
     delivery packing, and post-encoding size enforcement.
+    Reads provider/voice config from ~/.hermes/config.yaml (tts: section).
+
+    On messaging platforms, the returned MEDIA:<path> tag is intercepted
+    by the send pipeline and delivered as a native voice message.
+    In CLI mode, the file is saved to ~/voice-memos/.
+
+    Args:
+        text: The text to convert to speech.
+        output_path: Optional custom save path. Defaults to ~/voice-memos/<timestamp>.mp3
+        speed: Optional playback speed multiplier (0.25-4.0). Overrides config.yaml.
+        instructions: Optional voice-design guidance (tone, emotion, pacing,
+            accent, whispering). Forwarded to the OpenAI backend
+            (gpt-4o-mini-tts and OpenAI-compatible servers). Silently
+            ignored by backends that don't support it.
+        provider: Optional TTS provider override. When set, bypasses the
+            configured ``tts.provider`` and uses this provider instead.
+        model: Optional per-call model override. When set, overrides the
+            configured ``tts.model`` for this call. Supported by plugin TTS
+            providers (e.g. OpenRouter) and built-ins that read tts.model.
+            When ``None`` (the default), the configured model is used.
+
+    Returns:
+        str: JSON result with success, file_path, and optionally MEDIA tag.
     """
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
@@ -3170,6 +3194,12 @@ def _text_to_speech_single(
         clamped = max(0.25, min(4.0, float(speed)))
         tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
         tts_config["speed"] = clamped
+
+    # Per-call model override: forward to providers that support it (plugin
+    # TTS providers and built-ins that read tts.model), mirroring `provider`.
+    if model:
+        tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
+        tts_config["model"] = str(model)
 
     # Allow per-call provider override; fall back to the configured default.
     if provider:
@@ -4531,6 +4561,15 @@ TTS_SCHEMA = {
                     "names from tts.providers.<name>, or plugin-registered names. "
                     "When omitted, the configured tts.provider from config.yaml is used."
                 )
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Optional per-call TTS model override. When set, uses this model "
+                    "for this call instead of the configured tts.model. Supported by "
+                    "plugin TTS providers (e.g. OpenRouter: google/gemini-3.1-flash-tts-preview, "
+                    "x-ai/grok-voice-tts-1.0). When omitted, the configured model is used."
+                )
             }
         },
         "required": ["text"]
@@ -4546,7 +4585,8 @@ registry.register(
         output_path=args.get("output_path"),
         speed=args.get("speed"),
         instructions=args.get("instructions"),
-        provider=args.get("provider")),
+        provider=args.get("provider"),
+        model=args.get("model")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )

@@ -885,12 +885,18 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
 # ---------------------------------------------------------------------------
 # Model resolution + payload construction
 # ---------------------------------------------------------------------------
-def _resolve_fal_model() -> tuple:
+def _resolve_fal_model(model_override: Optional[str] = None) -> tuple:
     """Resolve the active FAL model from config.yaml (primary) or default.
 
     Returns (model_id, metadata_dict). Falls back to DEFAULT_MODEL if the
     configured model is unknown (logged as a warning).
+
+    ``model_override`` (per-call) wins over config when it names a known
+    model in the catalog.
     """
+    if model_override and model_override in FAL_MODELS:
+        return model_override, FAL_MODELS[model_override]
+
     model_id = ""
     try:
         from hermes_cli.config import load_config
@@ -1208,6 +1214,7 @@ def image_generate_tool(
     image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None,
     upscale: Optional[bool] = None,
+    model: Optional[str] = None,
 ) -> str:
     """Generate an image from a text prompt, or edit a source image, via FAL.
 
@@ -1219,12 +1226,14 @@ def image_generate_tool(
     and ``reference_image_urls``; the remaining kwargs are overrides for direct
     Python callers and are filtered per-model via the ``supports`` /
     ``edit_supports`` whitelist (unsupported overrides are silently dropped so
-    legacy callers don't break when switching models).
+    legacy callers don't break when switching models). ``model`` selects a
+    specific model from the catalog for this call instead of the configured
+    ``image_gen.model``.
 
     Returns a JSON string with ``{"success": bool, "image": url | None,
     "modality": "text" | "image", "error": str, "error_type": str}``.
     """
-    model_id, meta = _resolve_fal_model()
+    model_id, meta = _resolve_fal_model(model_override=model)
 
     # Collect any source images (primary + references) into one ordered list.
     source_images: list = []
@@ -1609,6 +1618,15 @@ IMAGE_GENERATE_SCHEMA = {
                     "than fidelity."
                 ),
             },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Optional per-call model override. When set, uses this model "
+                    "for this call instead of the configured image_gen.model. "
+                    "Only models the active provider knows are accepted. When "
+                    "omitted, the configured model is used."
+                ),
+            },
         },
         "required": ["prompt"],
     },
@@ -1660,6 +1678,7 @@ def _dispatch_to_plugin_provider(
     image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None,
     upscale: Optional[bool] = None,
+    model: Optional[str] = None,
 ):
     """Route the call to a plugin-registered provider when one is selected.
 
@@ -1724,8 +1743,10 @@ def _dispatch_to_plugin_provider(
 
     kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
     try:
-        if configured_model:
-            kwargs["model"] = configured_model
+        # Per-call model override wins; else fall back to the configured model.
+        chosen_model = model or configured_model
+        if chosen_model:
+            kwargs["model"] = chosen_model
         if isinstance(image_url, str) and image_url.strip():
             kwargs["image_url"] = image_url.strip()
         norm_refs = None
@@ -1961,6 +1982,7 @@ def _handle_image_generate(args, **kw):
     upscale = args.get("upscale")
     if not isinstance(upscale, bool):
         upscale = None
+    model = args.get("model")
     task_id = kw.get("task_id")
 
     # Terminal-backend confinement chokepoint: convert path-like sources to
@@ -1980,6 +2002,7 @@ def _handle_image_generate(args, **kw):
         image_url=image_url,
         reference_image_urls=reference_image_urls,
         upscale=upscale,
+        model=model,
     )
     if dispatched is not None:
         return _postprocess_image_generate_result(dispatched, task_id=task_id)
@@ -2004,6 +2027,7 @@ def _handle_image_generate(args, **kw):
         image_url=image_url,
         reference_image_urls=reference_image_urls,
         upscale=upscale,
+        model=model,
     )
     return _postprocess_image_generate_result(raw, task_id=task_id)
 
