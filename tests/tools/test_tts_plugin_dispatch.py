@@ -192,6 +192,21 @@ class TestPluginDispatch:
         assert provider.last_call is not None
         assert provider.last_call["kwargs"].get("model") == "acme/voice-2"
 
+    def test_config_voice_forwarded_to_plugin(self):
+        """The per-call voice override (tts_config['voice']) reaches synthesize."""
+        provider = _FakeTTSProvider(name="cartesia")
+        tts_registry.register_provider(provider)
+
+        result = tts_tool._dispatch_to_plugin_provider(
+            text="hello",
+            output_path="/tmp/out.mp3",
+            provider="cartesia",
+            tts_config={"voice": "nova"},
+        )
+        assert result == "/tmp/out.mp3"
+        assert provider.last_call is not None
+        assert provider.last_call["kwargs"].get("voice") == "nova"
+
 
     def test_provider_exception_bubbles_up(self):
         """Plugin exceptions are NOT swallowed by the dispatcher — they bubble
