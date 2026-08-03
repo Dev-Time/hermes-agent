@@ -177,6 +177,22 @@ class TestPluginDispatch:
         assert result is None
 
 
+    def test_config_model_forwarded_to_plugin(self):
+        """The per-call model override (tts_config['model']) reaches synthesize."""
+        provider = _FakeTTSProvider(name="cartesia")
+        tts_registry.register_provider(provider)
+
+        result = tts_tool._dispatch_to_plugin_provider(
+            text="hello",
+            output_path="/tmp/out.mp3",
+            provider="cartesia",
+            tts_config={"model": "acme/voice-2"},
+        )
+        assert result == "/tmp/out.mp3"
+        assert provider.last_call is not None
+        assert provider.last_call["kwargs"].get("model") == "acme/voice-2"
+
+
     def test_provider_exception_bubbles_up(self):
         """Plugin exceptions are NOT swallowed by the dispatcher — they bubble
         up so the outer ``text_to_speech_tool`` try/except converts them to
