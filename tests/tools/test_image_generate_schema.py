@@ -97,7 +97,9 @@ class TestDynamicParamGating(unittest.TestCase):
              patch("hermes_cli.plugins._ensure_plugins_discovered"):
             schema = _build_dynamic_image_schema()
         props = schema["parameters"]["properties"]
-        self.assertEqual(sorted(props), ["aspect_ratio", "prompt"])
+        # Fork-local: per-call model override is provider-agnostic and stays
+        # advertised even for text-only plugins.
+        self.assertEqual(sorted(props), ["aspect_ratio", "model", "prompt"])
         self.assertNotIn("upscale", props)
 
     def test_managed_krea_model_advertises_krea_edit_args_and_upscale(self):
