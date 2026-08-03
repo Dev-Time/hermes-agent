@@ -158,7 +158,9 @@ class TestDynamicParamGating(unittest.TestCase):
              patch("hermes_cli.plugins._ensure_plugins_discovered"):
             schema = _build_dynamic_image_schema()
         props = schema["parameters"]["properties"]
-        self.assertEqual(sorted(props), ["aspect_ratio", "prompt"])
+        # Fork-local: per-call model override is provider-agnostic and stays
+        # advertised even for text-only plugins.
+        self.assertEqual(sorted(props), ["aspect_ratio", "model", "prompt"])
         self.assertNotIn("upscale", props)
 
     def test_static_schema_carries_no_capability_args(self):
