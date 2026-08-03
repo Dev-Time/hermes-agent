@@ -2785,6 +2785,7 @@ def text_to_speech_tool(
     instructions: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    voice: Optional[str] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -2816,6 +2817,12 @@ def text_to_speech_tool(
             configured ``tts.model`` for this call. Supported by plugin TTS
             providers (e.g. OpenRouter) and built-ins that read tts.model.
             When ``None`` (the default), the configured model is used.
+        voice: Optional per-call voice override. When set, overrides the
+            configured ``tts.voice`` for this call. Supported by plugin TTS
+            providers and built-ins that read tts.voice. Must be valid for
+            the active model (voices are model-specific — pair with ``model``
+            when switching families). When ``None`` (the default), the
+            configured voice is used.
 
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
@@ -2845,6 +2852,12 @@ def text_to_speech_tool(
     if model:
         tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
         tts_config["model"] = str(model)
+
+    # Per-call voice override (same pattern as model): forward to providers
+    # that read tts.voice so the agent can pick a voice for a single call.
+    if voice:
+        tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
+        tts_config["voice"] = str(voice)
 
     # Allow per-call provider override; fall back to the configured default.
     if provider:
@@ -3877,6 +3890,16 @@ TTS_SCHEMA = {
                     "plugin TTS providers (e.g. OpenRouter: google/gemini-3.1-flash-tts-preview, "
                     "x-ai/grok-voice-tts-1.0). When omitted, the configured model is used."
                 )
+            },
+            "voice": {
+                "type": "string",
+                "description": (
+                    "Optional per-call TTS voice override. When set, uses this voice "
+                    "for this call instead of the configured tts.voice. Voices are "
+                    "model-specific (Gemini: Kore/Puck/Charon/..., Grok: "
+                    "Eve/Ara/Rex/Sal/Leo) — pair with `model` when switching families. "
+                    "When omitted, the configured voice is used."
+                )
             }
         },
         "required": ["text"]
@@ -3893,7 +3916,8 @@ registry.register(
         speed=args.get("speed"),
         instructions=args.get("instructions"),
         provider=args.get("provider"),
-        model=args.get("model")),
+        model=args.get("model"),
+        voice=args.get("voice")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )
