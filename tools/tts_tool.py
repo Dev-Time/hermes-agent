@@ -287,15 +287,18 @@ def _warn_ignored_tts_provider_override(requested: str, configured: str) -> None
     )
 
 
-def _apply_call_overrides(tts_config: dict[str, Any], speed: Optional[float], provider: Optional[str]):
-    """Apply per-call ``speed`` (clamped, on a shallow copy so the cached config isn't mutated) and
-    resolve the provider name. ``tts.provider`` in config.yaml is the authoritative backend
+def _apply_call_overrides(tts_config: dict[str, Any], speed: Optional[float], provider: Optional[str],
+                          model: Optional[str] = None):
+    """Apply per-call ``speed``/``model`` (clamped, on a shallow copy so the cached config isn't mutated)
+    and resolve the provider name. ``tts.provider`` in config.yaml is the authoritative backend
     selector (#90109): the per-call argument stays for internal/test callers, but a value that
     disagrees with the configured provider is ignored — the model-facing schema no longer
     advertises the override, and a leaked platform hint passing one anyway must not reroute
     speech to another vendor behind the operator's back."""
     if speed is not None:
         tts_config = {**tts_config, "speed": max(0.25, min(4.0, float(speed)))}
+    if model:
+        tts_config = {**tts_config, "model": str(model)}
     configured_provider = _get_provider(tts_config)
     if provider:
         requested = provider.lower().strip()
@@ -451,7 +454,8 @@ def _synthesize_chunks(chunks: list[str], base_path: Path, generated_artifacts: 
 
 def text_to_speech_tool(
     text: str, output_path: Optional[str] = None, speed: Optional[float] = None,
-    instructions: Optional[str] = None, provider: Optional[str] = None) -> str:
+    instructions: Optional[str] = None, provider: Optional[str] = None,
+    model: Optional[str] = None) -> str:
     """Convert text to speech with long-form chunking; returns the JSON result envelope.
 
     Text is normalized, split into provider-safe chunks (never silently truncated), synthesized
@@ -466,7 +470,7 @@ def text_to_speech_tool(
         text = text.strip()
     if not text:
         return tool_error("Text is empty after TTS cleanup", success=False)
-    tts_config, provider = _apply_call_overrides(_load_tts_config(), speed, provider)
+    tts_config, provider = _apply_call_overrides(_load_tts_config(), speed, provider, model=model)
     command_provider_config = _resolve_command_provider_config(provider, tts_config)
     max_len = _resolve_max_text_length(provider, tts_config)
     chunks = _split_text_for_tts(text, max_len)
@@ -659,6 +663,15 @@ TTS_SCHEMA = {
                     "Forwarded to the OpenAI backend (gpt-4o-mini-tts and OpenAI-compatible "
                     "voice-design servers). Silently ignored by backends that don't support it."
                 )
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Optional per-call TTS model override. When set, uses this model "
+                    "for this call instead of the configured tts.model. Supported by "
+                    "plugin TTS providers (e.g. OpenRouter: google/gemini-3.1-flash-tts-preview, "
+                    "x-ai/grok-voice-tts-1.0). When omitted, the configured model is used."
+                )
             }
         },
         "required": ["text"]
@@ -671,7 +684,7 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        **{k: args.get(k) for k in ("output_path", "speed", "instructions")}),
+        **{k: args.get(k) for k in ("output_path", "speed", "instructions", "model")}),
     check_fn=check_tts_requirements,
     emoji="🔊",
     dynamic_schema_overrides=_tts_schema_overrides)
