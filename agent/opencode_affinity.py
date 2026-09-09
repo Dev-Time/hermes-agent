@@ -24,10 +24,57 @@ Every request — main turn on any transport, auxiliary calls — goes through
 
 from __future__ import annotations
 
+import hashlib
 import uuid
+from contextvars import ContextVar
 from typing import Any, Optional
 
 OPENCODE_SESSION_HEADER = "x-opencode-session"
+
+_STATELESS_OP_CONTEXT: ContextVar[Optional[str]] = ContextVar(
+    "stateless_op_context", default=None
+)
+_STATELESS_OP_KEY: ContextVar[Optional[str]] = ContextVar(
+    "stateless_op_key", default=None
+)
+
+
+def stateless_operation_scope(key: Optional[str] = None):
+    """Bind out-of-turn calls to one operation identity (context manager).
+
+    Dashboard/plugin HTTP-handler threads run aux LLM calls with no conversation
+    scope; the relay hard-rejects a header-less request (400 MissingSessionID).
+    The owner of such an operation wraps its execution in this scope and every
+    call inside projects the same operation key instead of falling back to an
+    install-wide identity. Without a key a fresh one is minted per scope entry,
+    so unrelated operations never share a backend.
+    """
+    import contextlib
+    import uuid
+
+    @contextlib.contextmanager
+    def _scope():
+        token_op = _STATELESS_OP_CONTEXT.set(key or f"hermes-op-{uuid.uuid4().hex[:12]}")
+        token_key = _STATELESS_OP_KEY.set(None)
+        try:
+            yield
+        finally:
+            _STATELESS_OP_KEY.reset(token_key)
+            _STATELESS_OP_CONTEXT.reset(token_op)
+
+    return _scope()
+
+
+def _stateless_session_key() -> Optional[str]:
+    """Key for the current stateless operation, minted lazily inside the scope."""
+    op = _STATELESS_OP_CONTEXT.get()
+    if op is None:
+        return None
+    key = _STATELESS_OP_KEY.get()
+    if key is None:
+        key = f"{op}-{hashlib.sha256(op.encode('utf-8')).hexdigest()[:8]}"
+        _STATELESS_OP_KEY.set(key)
+    return key
 
 
 def opencode_transport(provider: Optional[str], model: Optional[str], base_url: Optional[str]) -> tuple[Optional[str], str]:
@@ -102,6 +149,11 @@ def opencode_session_headers(
     if not is_opencode_target(provider, base_url):
         return {}
     key = resolve_affinity_key(session_id)
+    if not key:
+        # Stateful out-of-turn operations (dashboard/plugin HTTP-handler threads) wrap their
+        # work in stateless_operation_scope() so every call inside projects the same
+        # operation key instead of a per-call identity (#105011).
+        key = _stateless_session_key()
     if not key:
         # Stateless one-shot requests (commit messages, summaries, standalone prompts outside
         # a session) lack an ambient conversation or session id. OpenCode Go strictly requires

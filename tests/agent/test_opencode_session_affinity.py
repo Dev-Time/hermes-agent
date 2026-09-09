@@ -161,3 +161,76 @@ def test_stateless_oneshot_still_sends_an_opencode_session_header(out_of_turn):
 
     assert opencode_session_headers("opencode-go", None, session_id=None).get("x-opencode-session")
     assert opencode_session_headers("openrouter", "https://openrouter.ai/api/v1", session_id=None) == {}
+
+
+def test_stateless_scope_gives_stable_key_and_scopes_isolate(monkeypatch):
+    """Out-of-turn calls inside one stateless operation share its key;
+    different operations get different keys; no scope → header omitted (#105011)."""
+    from agent import opencode_affinity
+    from agent import portal_tags
+
+    monkeypatch.setattr(portal_tags, "get_affinity_scope", lambda: "")
+    monkeypatch.setattr(portal_tags, "get_conversation_context", lambda: "")
+
+    with opencode_affinity.stateless_operation_scope("dashboard-refresh-7"):
+        first = opencode_affinity.opencode_session_headers(
+            "opencode-go", "https://opencode.ai/zen/go/v1", None
+        )
+        second = opencode_affinity.opencode_session_headers(
+            "opencode-go", "https://opencode.ai/zen/go/v1", None
+        )
+    assert first == second
+    assert first["x-opencode-session"].startswith("dashboard-refresh-7-")
+
+    with opencode_affinity.stateless_operation_scope("plugin-sync-2"):
+        third = opencode_affinity.opencode_session_headers(
+            "opencode-go", "https://opencode.ai/zen/go/v1", None
+        )
+    assert third["x-opencode-session"] != first["x-opencode-session"]
+
+    # No scope at all → the header is omitted rather than pinned to an
+    # install-wide identity.
+    bare = opencode_affinity.opencode_session_headers(
+        "opencode-go", "https://opencode.ai/zen/go/v1", None
+    )
+    assert bare == {}
+
+    # Explicit session_id still wins over the operation key.
+    with opencode_affinity.stateless_operation_scope("dashboard-refresh-7"):
+        pinned = opencode_affinity.opencode_session_headers(
+            "opencode-go", "https://opencode.ai/zen/go/v1", "sess-1"
+        )
+    assert pinned["x-opencode-session"] == "sess-1"
+
+    # Non-OpenCode targets stay untouched.
+    assert (
+        opencode_affinity.opencode_session_headers(
+            "openrouter", "https://openrouter.ai/api/v1", None
+        )
+        == {}
+    )
+
+
+def test_aux_call_from_plain_thread_carries_operation_key():
+    """HTTP-handler threads (kanban Specify/Decompose) have no turn scope — inside a
+    stateless operation scope the built kwargs carry that operation's key."""
+    import threading
+
+    from agent import auxiliary_client as aux
+    from agent import opencode_affinity
+
+    result = {}
+
+    def run():
+        with opencode_affinity.stateless_operation_scope("kanban-specify-42"):
+            kwargs = aux._build_call_kwargs(
+                "opencode-go", "glm-5", _MSGS, base_url="https://opencode.ai/zen/go/v1"
+            )
+        result["key"] = (kwargs.get("extra_headers") or {}).get(
+            "x-opencode-session", ""
+        )
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join()
+    assert result["key"].startswith("kanban-specify-42-")
