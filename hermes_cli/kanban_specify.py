@@ -152,7 +152,7 @@ def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
     missing aux client degrades to a skip instead of an import-time crash.
     """
     try:
-        from agent.auxiliary_client import call_llm
+        from agent.auxiliary_client import call_llm, scoped_runtime_main
     except Exception as exc:  # pragma: no cover — import smoke test
         log.debug("%s: auxiliary client import failed: %s", verb, exc)
         return None, "auxiliary client unavailable"
@@ -167,13 +167,18 @@ def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
         # Route through call_llm so auxiliary.triage_specifier.* config (provider/model/base_url,
         # extra_body, reasoning_effort, retries) all apply — the direct-create path dropped extra_body
         # (#35566).
-        resp = call_llm(
-            task=aux_task,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.3,
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
+        # Kanban commands run outside an agent turn, so bind an explicit task-stable OpenCode
+        # affinity key: without a runtime binding `_runtime_main_value("session_id")` is empty and
+        # the relay 400s with MissingSessionID (#112043). Opaque + stable per logical task is all
+        # the relay needs; non-OpenCode targets ignore the binding entirely.
+        with scoped_runtime_main({"session_id": f"kanban:{task_id}"}):
+            resp = call_llm(
+                task=aux_task,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.3,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
     except Exception as exc:
         suffix = " — skipping" if verb == "specify" else ""
         log.info("%s: API call failed for %s (%s)%s", verb, task_id, exc, suffix)
