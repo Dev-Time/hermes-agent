@@ -852,11 +852,28 @@ def _render_background_block(background_processes: Optional[List[Dict[str, Any]]
     return JUDGE_BACKGROUND_BLOCK_TEMPLATE.format(background_lines="\n".join(lines))
 
 
-def _call_goal_judge_llm(call_llm, system_prompt: str, user_prompt: str, timeout: Optional[float]) -> str:
+def _call_goal_judge_llm(call_llm, system_prompt: str, user_prompt: str, timeout: Optional[float],
+                         task_id: Optional[str] = None, goal_text: Optional[str] = None) -> str:
     """Route through call_llm so auxiliary.goal_judge.* config (provider/model, extra_body,
     reasoning_effort, retries) all apply. Returns the raw reply text."""
     # See #35566.
     # Route through call_llm — same #35566 fix as the judge call above.
+    # Out-of-turn goal judging has no agent runtime binding; bind a task-stable OpenCode affinity
+    # key so the relay doesn't 400 with MissingSessionID (#112043 class). Non-OpenCode targets
+    # ignore it. Kanban callers pass the task id; the plain goal loop passes the goal text so one
+    # goal's judgments stay on one backend across turns.
+    scope_key = f"kanban-goal:{task_id}" if task_id else None
+    if scope_key is None and goal_text:
+        import hashlib
+        scope_key = f"goal:{hashlib.sha256(goal_text.strip().encode()).hexdigest()[:12]}"
+    if scope_key:
+        from agent.auxiliary_client import scoped_runtime_main
+        with scoped_runtime_main({"session_id": scope_key}):
+            return _call_goal_judge_llm_inner(call_llm, system_prompt, user_prompt, timeout)
+    return _call_goal_judge_llm_inner(call_llm, system_prompt, user_prompt, timeout)
+
+
+def _call_goal_judge_llm_inner(call_llm, system_prompt: str, user_prompt: str, timeout: Optional[float]) -> str:
     resp = call_llm(
         task="goal_judge",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
@@ -877,6 +894,8 @@ def judge_goal(
     background_processes: Optional[List[Dict[str, Any]]] = None,
     contract: Optional[GoalContract] = None,
     active_delegations: int = 0,
+    task_id: Optional[str] = None,
+    goal_text: Optional[str] = None,
 ) -> Tuple[str, str, bool, Optional[Dict[str, Any]], bool]:
     """Ask the auxiliary model whether the goal is satisfied.
 
@@ -920,7 +939,8 @@ def judge_goal(
         prompt = JUDGE_USER_PROMPT_TEMPLATE.format(**common)
 
     try:
-        raw = _call_goal_judge_llm(call_llm, JUDGE_SYSTEM_PROMPT, prompt, timeout)
+        raw = _call_goal_judge_llm(call_llm, JUDGE_SYSTEM_PROMPT, prompt, timeout,
+                                   task_id=task_id, goal_text=goal_text or goal)
     except AuxiliaryClientUnavailable as exc:
         # No client at all (e.g. a dead Nous refresh token): name the cause so the user is sent to
         # re-authenticate, not to context-length / model debugging (#42177). Still fails open.

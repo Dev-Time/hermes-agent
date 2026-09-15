@@ -150,13 +150,17 @@ def describe_profile(profile_name: str, *, overwrite: bool = False, timeout: Opt
         # call_llm applies auxiliary.profile_describer.* config (provider/model/base_url,
         # extra_body, reasoning_effort, retries); the direct-create path dropped extra_body.
         # See #35566.
-        resp = call_llm(
-            task="profile_describer",
-            messages=[{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}],
-            temperature=0.3,
-            max_tokens=400,
-            timeout=timeout or 60,
-        )
+        # Headless call (no agent turn) — bind a profile-stable OpenCode affinity key so the
+        # relay doesn't 400 with MissingSessionID (#112043 class); non-OpenCode targets ignore it.
+        from agent.auxiliary_client import scoped_runtime_main
+        with scoped_runtime_main({"session_id": f"profile-describe:{canon}"}):
+            resp = call_llm(
+                task="profile_describer",
+                messages=[{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}],
+                temperature=0.3,
+                max_tokens=400,
+                timeout=timeout or 60,
+            )
     except Exception as exc:
         logger.info("describe: API call failed for %s (%s)", canon, exc)
         return DescribeOutcome(canon, False, f"LLM error: {type(exc).__name__}")
