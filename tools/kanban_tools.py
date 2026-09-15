@@ -401,7 +401,8 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
         return
     try:
         verdict, reason, _, _, _ = judge_goal(
-            goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip())
+            goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip(),
+            task_id=tid)
     except Exception as judge_exc:
         logger.warning(
             "goal judge check failed, allowing lifecycle handoff: %s", judge_exc, exc_info=True)

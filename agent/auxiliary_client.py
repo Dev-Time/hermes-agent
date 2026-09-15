@@ -2909,7 +2909,11 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
 
 
 _MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
-_MAIN_RUNTIME_CONTEXT_FIELDS = _MAIN_RUNTIME_FIELDS + ("requested_provider",)
+# ``session_id`` is load-bearing: ``scoped_runtime_main`` callers (kanban specify/decompose,
+# #112043) bind only it, and ``opencode_session_headers`` reads it from the normalized runtime;
+# dropping it here silently produced header-less OpenCode requests. ``cache_scope`` rides along
+# for rotation-stable prompt_cache_key derivations (mirrors ``set_runtime_main``).
+_MAIN_RUNTIME_CONTEXT_FIELDS = _MAIN_RUNTIME_FIELDS + ("requested_provider", "session_id", "cache_scope")
 
 
 def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any]:
