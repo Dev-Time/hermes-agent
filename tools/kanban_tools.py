@@ -467,12 +467,14 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
         return
     try:
         # Headless gate runs outside any agent turn: bind the per-task relay-affinity scope
-        # (mirrors kanban_specify) so the relay does not reject the judge call (#113669).
+        # (mirrors kanban_specify) so the relay does not reject the judge call (#113669),
+        # and pass task_id so the judge can look up sibling/subgoal context (#112043).
         from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{tid}")
         try:
             verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip())
+                goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip(),
+                task_id=tid)
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)
