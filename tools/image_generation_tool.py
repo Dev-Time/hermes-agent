@@ -721,9 +721,10 @@ def _maybe_route_managed_model(
     ``model`` (per-call override) is accepted for handler passthrough only; managed routing
     follows the stored selection, not the override.
     """
-    plugin_name, model_id = _managed_model_plugin()
-    if plugin_name is None:
+    target = _managed_model_plugin()
+    if target is None:
         return None
+    plugin_name, model_id = target
     try:
         if plugin_name == "krea":
             from plugins.image_gen.krea import _resolve_managed_krea_gateway
