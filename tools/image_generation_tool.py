@@ -709,9 +709,10 @@ def _maybe_route_managed_model(
     A Krea model with no reachable Krea gateway falls through (direct/BYO users keep their
     pipeline); a Portal model never does — falling through would silently bill a FAL default.
     """
-    plugin_name, model_id = _managed_model_plugin()
-    if plugin_name is None:
+    target = _managed_model_plugin()
+    if target is None:
         return None
+    plugin_name, model_id = target
     try:
         if plugin_name == "krea":
             from plugins.image_gen.krea import _resolve_managed_krea_gateway
