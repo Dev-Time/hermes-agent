@@ -188,12 +188,13 @@ def test_stateless_scope_gives_stable_key_and_scopes_isolate(monkeypatch):
         )
     assert third["x-opencode-session"] != first["x-opencode-session"]
 
-    # No scope at all → the header is omitted rather than pinned to an
-    # install-wide identity.
+    # No scope at all → an ephemeral oneshot key is still sent; OpenCode Go
+    # rejects header-less requests with 400 MissingSessionID (#105841), so the
+    # fork keeps the ephemeral fallback rather than omitting the header.
     bare = opencode_affinity.opencode_session_headers(
         "opencode-go", "https://opencode.ai/zen/go/v1", None
     )
-    assert bare == {}
+    assert bare["x-opencode-session"].startswith("oneshot-")
 
     # Explicit session_id still wins over the operation key.
     with opencode_affinity.stateless_operation_scope("dashboard-refresh-7"):
