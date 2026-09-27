@@ -1385,6 +1385,7 @@ def create_profile(
     name: str, clone_from: Optional[str] = None, clone_all: bool = False, clone_config: bool = False,
     no_alias: bool = False, no_skills: bool = False, description: Optional[str] = None,
     clone_channels: bool = False, sync_imports: bool = False, soul: Optional[str] = None,
+    extends: Optional[str] = None,
 ) -> Path:
     """Create a new profile directory and return its path.
 
@@ -1397,7 +1398,8 @@ def create_profile(
     ``no_skills`` creates an empty profile and writes a marker so ``hermes update`` skips
     re-seeding its skills; it is mutually exclusive with the clone options, which copy skills.
     ``sync_imports`` (``--clone`` only; ``--clone-all`` copies the file anyway) also copies the
-    ``import-agent`` sync manifest so the clone can keep pulling the same external agent trees."""
+    ``import-agent`` sync manifest so the clone can keep pulling the same external agent trees.
+    ``extends`` specifies a base configuration file to inherit from (seeds config.yaml with ``extends: <path>``)."""
     if no_skills and (clone_from is not None or clone_config or clone_all):
         raise ValueError(
             "--no-skills is mutually exclusive with --clone / --clone-from / --clone-all "
@@ -1407,6 +1409,24 @@ def create_profile(
         raise ValueError("--sync-imports requires --clone or --clone-from (there is no import "
                          "manifest to carry over without a source profile).")
     cloning = clone_from is not None or clone_all or clone_config
+    if extends and cloning:
+        raise ValueError("--extends cannot be combined with --clone / --clone-from / --clone-all.")
+    if extends:
+        trimmed = extends.strip()
+        expanded = os.path.expandvars(trimmed)
+        resolved_path = Path(os.path.expanduser(expanded)).resolve()
+        if not resolved_path.is_file():
+            raise FileNotFoundError(
+                f"Extended config file not found: {resolved_path} (from --extends '{extends}')"
+            )
+        try:
+            with open(resolved_path, "rb") as f:
+                f.read(1)
+        except OSError as exc:
+            raise PermissionError(
+                f"Extended config file is not readable: {resolved_path} ({exc})"
+            ) from exc
+        extends = str(resolved_path)
     if clone_channels and not cloning:
         raise ValueError("--clone-channels only applies to a clone (--clone, --clone-from or --clone-all).")
     canon = _canon_valid(name)
@@ -1452,7 +1472,7 @@ def create_profile(
             if stripped:
                 logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
         from hermes_cli.profiles_initialization import finish_profile_layout
-        finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all, description=description, soul=soul)
+        finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all, description=description, soul=soul, extends=extends)
         os.rename(staging, profile_dir)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

@@ -176,6 +176,10 @@ def show_config():
 
     _section("Paths")
     print(f"  Config:       {_cfg.get_config_path()}")
+    if config.get("extends"):
+        ext = config["extends"]
+        ext_str = ", ".join(ext) if isinstance(ext, list) else str(ext)
+        print(f"  Extends:      {ext_str}")
     print(f"  Secrets:      {_cfg.get_env_path()}")
     print(f"  Install:      {_cfg.get_project_root()}")
 
