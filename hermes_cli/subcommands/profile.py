@@ -44,6 +44,10 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         help="Create an empty profile with no bundled skills (opts out of `hermes update` skill sync)",
     )
     profile_create.add_argument(
+        "--extends", metavar="PATH", default=None,
+        help="Base config file to extend (seeds config.yaml with `extends: <PATH>`)",
+    )
+    profile_create.add_argument(
         "--description", default=None,
         help="One- or two-sentence description of what this profile is good at. "
              "Used by the kanban decomposer to route tasks based on role instead "

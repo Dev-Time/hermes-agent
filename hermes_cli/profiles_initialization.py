@@ -5,7 +5,8 @@ from typing import Optional
 
 
 def finish_profile_layout(profile_dir: Path, *, no_skills: bool, clone_all: bool,
-                           description: Optional[str], soul: Optional[str] = None) -> None:
+                           description: Optional[str], soul: Optional[str] = None,
+                           extends: Optional[str] = None) -> None:
     """Seed files a fresh profile owns from day one; runs on the staging tree before publish."""
     from hermes_cli.profiles import (
         _seed_file_if_missing, _PLACEHOLDER_ENV, NO_BUNDLED_SKILLS_MARKER,
@@ -13,6 +14,12 @@ def finish_profile_layout(profile_dir: Path, *, no_skills: bool, clone_all: bool
     )
     if soul is not None:
         (profile_dir / "SOUL.md").write_text(soul, encoding="utf-8")
+
+    if extends and str(extends).strip():
+        cfg_path = profile_dir / "config.yaml"
+        if not cfg_path.exists():
+            import hermes_yaml as yaml
+            cfg_path.write_text(yaml.safe_dump({"extends": extends.strip()}, sort_keys=False), encoding="utf-8")
 
     # Seed an empty .env so the profile owns a credentials file from day one. Without it,
     # profile-scoped env writes (dashboard Channels/Keys pages, `hermes -p <name> auth add`)
