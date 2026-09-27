@@ -87,3 +87,39 @@ def test_buildable_pyproject_member_keeps_its_declared_name(tmp_path):
     member = _workspace_member(plugin, root, identity=plugin)
     assert (member / "pyproject.toml").read_text(encoding="utf-8") == (
         plugin / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_virtual_member_without_project_metadata_gets_a_version(tmp_path):
+    """A metadata-only member whose pyproject is tooling-only (no [project]) is
+    emitted as `[project] name = …`; uv rejects a [project] table without
+    version, and `uv lock` failing aborts the whole dependency sync."""
+    import tomllib
+    from pm.workspace import _workspace_member
+
+    plugin = tmp_path / "home" / "plugins" / "hermes-lcm"
+    plugin.mkdir(parents=True)
+    (plugin / "pyproject.toml").write_text('[tool.ruff]\ntarget-version = "py311"\n', encoding="utf-8")
+    root = tmp_path / "gen"
+    root.mkdir()
+    member = _workspace_member(plugin, root, identity=plugin)
+    project = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["name"].startswith("hermes-plugin-hermes-lcm")
+    assert project["version"] == "0.0.0"
+
+
+def test_virtual_member_declaring_dynamic_version_is_left_alone(tmp_path):
+    """PEP 621 forbids a static project.version while version is listed under
+    project.dynamic; adding one would make uv reject the manifest."""
+    import tomllib
+    from pm.workspace import _workspace_member
+
+    plugin = tmp_path / "home" / "plugins" / "dynver"
+    plugin.mkdir(parents=True)
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname = "dynver"\ndynamic = ["version"]\n', encoding="utf-8")
+    root = tmp_path / "gen"
+    root.mkdir()
+    member = _workspace_member(plugin, root, identity=plugin)
+    project = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert "version" not in project
+    assert project["dynamic"] == ["version"]
