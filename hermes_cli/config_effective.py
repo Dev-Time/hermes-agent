@@ -93,12 +93,24 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
                 raw, recovered = _recover_user_raw(config_path, path_key, exc), True
             else:
                 raw = loaded if isinstance(loaded, dict) else {}
-                _config._raw_config_cache_store(path_key, user_sig, copy.deepcopy(raw))
+                try:
+                    raw, ext_paths = _config._resolve_config_extends(raw, config_path)
+                    _config._CONFIG_EXTENDED_PATHS[path_key] = ext_paths
+                except Exception as exc:
+                    if fail_closed:
+                        raise
+                    raw, recovered = _recover_user_raw(config_path, path_key, exc), True
+                if not recovered:
+                    _config._raw_config_cache_store(
+                        path_key, user_sig, copy.deepcopy(raw),
+                        _config._get_extended_paths_sigs(path_key))
+                    # ext paths are known only now: recompute so the effective-cache sig folds them.
+                    _, cache_sig = _config._load_config_cache_sig(config_path)
                 _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
                 # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
                 # must not create backups/ inside that profile.
-                if config_path == _config.get_config_path():
+                if config_path == _config.get_config_path() and not recovered:
                     from hermes_cli.config_backups import backup_config
                     backup_config(config_path, "good")
 
