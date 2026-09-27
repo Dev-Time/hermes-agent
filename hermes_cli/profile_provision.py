@@ -61,6 +61,7 @@ class ProfileCreateRequest:
     sync_imports: bool = False
     description: Optional[str] = None
     soul: Optional[str] = None
+    extends: Optional[str] = None      # base config.yaml this profile inherits (seeds `extends: <path>`)
     alias: bool = True                 # ~/.local/bin/<name> wrapper when the name is free
     quiet: bool = True                 # bundled-skill seeding prints its own failures when False
     # Bot-page defaults (see module docstring); every surface exposes both opt-outs.
@@ -233,6 +234,7 @@ def provision_profile(request: ProfileCreateRequest) -> ProvisionResult:
             clone_config=request.clone_config, no_skills=request.no_skills,
             description=request.description, clone_channels=request.clone_channels,
             sync_imports=request.sync_imports, soul=request.soul, seed_model=request.mirror_credentials,
+            extends=request.extends,
         )
     result = ProvisionResult(path=path)
 

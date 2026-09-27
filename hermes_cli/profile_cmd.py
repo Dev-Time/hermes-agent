@@ -203,6 +203,7 @@ def _profile_create(args):
     clone_from = getattr(args, "clone_from", None)
     clone_channels = getattr(args, "clone_channels", False)
     sync_imports = getattr(args, "sync_imports", False)
+    extends = getattr(args, "extends", None)
     clone_config = clone or clone_from is not None
     cloned = clone_config or clone_all
     _refuse_create_args(args, clone_from, cloned)
@@ -212,7 +213,7 @@ def _profile_create(args):
         clone_channels=clone_channels, sync_imports=sync_imports,
         alias=not no_alias, quiet=False,
         mirror_credentials=not getattr(args, "no_credentials", False),
-        share_auth=not getattr(args, "isolated_auth", False))
+        share_auth=not getattr(args, "isolated_auth", False), extends=extends)
     try:
         # A gateway serving this terminal makes the profile (one HERMES_TUI_GATEWAY_URL names always
         # does); with none it is made here. Either way the receipt below is read where it was made.
@@ -221,6 +222,8 @@ def _profile_create(args):
         _die(f"Error: {e}")
     print(f"\nProfile '{name}' created at {made.path}")
     source_label = made.source_label
+    if extends:
+        print(f"Extending base configuration from {extends}.")
     if cloned:
         if clone_all:
             print(f"Full copy from {source_label} (excluding session history, cron jobs, backups, and snapshots).")
