@@ -1016,6 +1016,7 @@ _EXTRA_KNOWN_ROOT_KEYS = {
     "multiplex_profiles", "profile_routes", "platforms", "require_mention",
     "unauthorized_dm_behavior", "signal", "allow_all_users",
     "timeouts",          # unified timeout resolution section (agent/deadline.py)
+    "extends",           # base config file inheritance directive
 }
 _KNOWN_ROOT_KEYS = frozenset(DEFAULT_CONFIG.keys()) | _EXTRA_KNOWN_ROOT_KEYS
 
@@ -1930,12 +1931,120 @@ def cfg_get(cfg: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> A
     return node
 
 
+# path_key -> list of resolved Paths that this config extends
+_CONFIG_EXTENDED_PATHS: Dict[str, List[Path]] = {}
+
+
+def _get_extended_paths_sigs(path_key: str) -> Tuple[Tuple[int, int, int, int], ...]:
+    """Return file signatures for all files extended by path_key."""
+    paths = _CONFIG_EXTENDED_PATHS.get(path_key, [])
+    sigs = []
+    for p in paths:
+        try:
+            sigs.append(file_signature(p.stat()))
+        except OSError:
+            sigs.append((0, 0, 0, 0))
+    return tuple(sigs)
+
+
+def _resolve_config_extends(
+    raw_data: Any,
+    config_path: Path,
+    visited: Optional[Set[Path]] = None,
+    depth: int = 0,
+) -> Tuple[Dict[str, Any], List[Path]]:
+    """Resolve `extends:` in *raw_data* recursively.
+
+    - Accepts a string path or list of string paths.
+    - Expands environment variables, `~`, and resolves relative to config_path.parent.
+    - Fails closed if an extended file cannot be found or read.
+    - Guarded against circular references and recursion depth > 10.
+    - Deep-merges base configs in order, with raw_data overriding base settings.
+    - Returns (merged_dict, all_extended_paths).
+    """
+    if not isinstance(raw_data, dict) or "extends" not in raw_data:
+        return (raw_data if isinstance(raw_data, dict) else {}), []
+
+    extends_val = raw_data.get("extends")
+    if not extends_val:
+        return raw_data, []
+
+    if isinstance(extends_val, str):
+        targets = [extends_val]
+    elif isinstance(extends_val, (list, tuple)):
+        targets = [str(t) for t in extends_val if t]
+    else:
+        raise TypeError(f"'extends' must be a string path or list of paths, got {type(extends_val).__name__}")
+
+    try:
+        current_canonical = config_path.resolve()
+    except OSError:
+        current_canonical = config_path
+
+    if visited is None:
+        visited = set()
+    visited_with_current = visited | {current_canonical}
+
+    if depth >= 10:
+        raise ValueError(f"Max config inheritance depth (10) exceeded while resolving {config_path}")
+
+    merged: Dict[str, Any] = {}
+    all_extended_paths: List[Path] = []
+
+    for target in targets:
+        expanded_target = os.path.expandvars(target.strip())
+        target_path = Path(os.path.expanduser(expanded_target))
+        if not target_path.is_absolute():
+            target_path = config_path.parent / target_path
+        try:
+            resolved_target = target_path.resolve()
+        except OSError:
+            resolved_target = target_path
+
+        if not resolved_target.is_file():
+            raise FileNotFoundError(f"Extended config file not found: {resolved_target} (referenced in {config_path})")
+
+        if resolved_target in visited_with_current:
+            chain = sorted(str(p) for p in visited_with_current)
+            raise ValueError(f"Circular config inheritance detected: {resolved_target} in {chain}")
+
+        with open(resolved_target, encoding="utf-8-sig") as f:
+            base_data = fast_safe_load(f) or {}
+
+        if not isinstance(base_data, dict):
+            raise TypeError(f"Extended config {resolved_target} must be a YAML mapping, got {type(base_data).__name__}")
+
+        nested_merged, nested_paths = _resolve_config_extends(
+            base_data, resolved_target, visited=visited_with_current, depth=depth + 1
+        )
+        all_extended_paths.extend(nested_paths)
+        all_extended_paths.append(resolved_target)
+        merged = _deep_merge(merged, nested_merged)
+
+    # Merge current file data on top of base
+    final_merged = _deep_merge(merged, raw_data)
+
+    # Deduplicate paths preserving order
+    deduped: List[Path] = []
+    seen: Set[Path] = set()
+    for p in all_extended_paths:
+        if p not in seen:
+            seen.add(p)
+            deduped.append(p)
+
+    return final_merged, deduped
+
+
 def _raw_config_cache_hit(path_key: str, cache_key: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
     """Pure lookup: the cached raw config for ``path_key`` if its signature equals ``cache_key``,
     else ``None``. Shared by the lock-free fast path and the locked re-check of
     ``_read_raw_config_impl`` so the predicate cannot drift between them."""
     cached = _RAW_CONFIG_CACHE.get(path_key)
     if cached is not None and cached[:len(cache_key)] == cache_key:
+        if len(cached) > len(cache_key) + 1:
+            expected_ext_sigs = cached[len(cache_key) + 1]
+            if _get_extended_paths_sigs(path_key) != expected_ext_sigs:
+                return None
         return cached[len(cache_key)]
     return None
 
@@ -1979,16 +2088,27 @@ def _read_raw_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         if not isinstance(data, dict):
             return FailedConfigRead(error=TypeError(f"top-level YAML must be a mapping, got {type(data).__name__}"))
         _CONFIG_PARSE_FAILURES.pop(path_key, None)  # the file reads now (a transient error left the record)
+
+        try:
+            data, ext_paths = _resolve_config_extends(data, config_path)
+            _CONFIG_EXTENDED_PATHS[path_key] = ext_paths
+        except Exception as e:
+            _warn_config_parse_failure(config_path, e)
+            return FailedConfigRead(error=e)
+
         # The cache stores its own deepcopy. The readonly path returns THAT object (identity
         # invariant: later cache hits return the same dict); the mutable path returns the parse.
+        ext_sigs = _get_extended_paths_sigs(path_key)
         cached_copy = copy.deepcopy(data)
-        _RAW_CONFIG_CACHE[path_key] = (*cache_key, cached_copy)
+        _RAW_CONFIG_CACHE[path_key] = (*cache_key, cached_copy, ext_sigs)
         return data if want_deepcopy else cached_copy
 
 
 def read_raw_config() -> Dict[str, Any]:
-    """Read config.yaml as-is (no defaults merged, no migration); ``{}`` if missing/unparseable.
-    Cached on the file signature (mtime_ns, size, ino, ctime_ns); returns a deepcopy since callers mutate before ``save_config()``."""
+    """Read config.yaml with extended base configurations merged (no schema defaults merged,
+    no migration); ``{}`` if missing/unparseable. Leaf-only raw config is available via
+    ``read_user_config_raw()``. Cached on the file signature and extended paths' signatures;
+    returns a deepcopy since callers mutate before ``save_config()``."""
     return _read_raw_config_impl(want_deepcopy=True)
 
 
@@ -2255,8 +2375,9 @@ def apply_terminal_config_to_env(
 
 def _load_config_cache_sig(config_path: Path) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[Tuple[int, ...]]]:
     """Return ``(user_sig, cache_sig)`` for ``_LOAD_CONFIG_CACHE``.
-    The managed config file's signature is folded in ((0, 0, 0, 0) = none) so editing it invalidates
-    the merged result. ``cache_sig`` is None only when neither file exists (nothing to cache on)."""
+    ``user_sig`` is None when config.yaml is missing; ``cache_sig`` incorporates both user and
+    managed file signatures plus any extended base configurations, folded into a fixed-length
+    8-tuple so cached entries keep fixed positions for config and env snapshot."""
     try:
         st = config_path.stat()
         user_sig: Optional[Tuple[int, int, int, int]] = file_signature(st)
@@ -2270,7 +2391,15 @@ def _load_config_cache_sig(config_path: Path) -> Tuple[Optional[Tuple[int, int, 
         managed_sig = (0, 0, 0, 0)
     if user_sig is None and managed_sig == (0, 0, 0, 0):
         return None, None
-    return user_sig, (*(user_sig or (0, 0, 0, 0)), *managed_sig)
+    u = user_sig or (0, 0, 0, 0)
+    m = managed_sig
+    ext_sigs = _get_extended_paths_sigs(str(config_path))
+    if ext_sigs:
+        import zlib
+        ext_bytes = b"".join(int(x).to_bytes(8, "big", signed=True) for sig in ext_sigs for x in sig)
+        ext_hash = zlib.crc32(ext_bytes)
+        u = (u[0] ^ ext_hash, u[1], u[2], u[3])
+    return user_sig, (*u, *m)
 
 
 def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: Exception) -> Optional[Dict[str, Any]]:
@@ -2336,7 +2465,7 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[Dict[str, 
     pin unexpanded literals (e.g. auxiliary.<task>.api_key) for the process lifetime (#58514).
     Shared by the lock-free fast path and the locked re-check of ``_load_config_impl``."""
     cached = _LOAD_CONFIG_CACHE.get(path_key)
-    if cached is None or cache_sig is None or cached[:8] != cache_sig:
+    if cached is None or cache_sig is None or len(cached) != 10 or cached[:8] != cache_sig:
         return None
     hit = cached[8]
     if isinstance(hit, FailedConfigRead) and isinstance(hit.read_error, OSError):
@@ -2390,6 +2519,10 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 with open(config_path, encoding="utf-8-sig") as f:
                     user_config = fast_safe_load(f) or {}
                 _CONFIG_PARSE_FAILURES.pop(path_key, None)  # the file reads now (a transient error left the record)
+
+                user_config, ext_paths = _resolve_config_extends(user_config, config_path)
+                _CONFIG_EXTENDED_PATHS[path_key] = ext_paths
+                _, cache_sig = _load_config_cache_sig(config_path)
 
                 if "max_turns" in user_config:
                     agent_user_config = dict(user_config.get("agent") or {})
@@ -2543,11 +2676,24 @@ def save_config(
         if strip_defaults:
             # ``_strip_default_values`` always preserves ``_config_version`` itself.
             effective_preserve_keys = _explicit_config_paths(_raw_for_paths) | set(preserve_keys or ())
-            normalized = _strip_default_values(normalized, DEFAULT_CONFIG, preserve_keys=effective_preserve_keys)
+            strip_baseline = DEFAULT_CONFIG
+            if "extends" in _raw_for_paths:
+                try:
+                    base_merged, _ = _resolve_config_extends({"extends": _raw_for_paths["extends"]}, config_path)
+                    base_merged.pop("extends", None)
+                    strip_baseline = _deep_merge(copy.deepcopy(DEFAULT_CONFIG), base_merged)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Cannot save config to {config_path}: extended base configuration could not be resolved ({exc}). "
+                        "Refusing to save to avoid flattening inherited base values into the profile config."
+                    ) from exc
+            normalized = _strip_default_values(normalized, strip_baseline, preserve_keys=effective_preserve_keys)
 
         atomic_config_replace(config_path, normalized, extra_content_on_create=_commented_sections_for_save(normalized))
         _secure_file(config_path)
         _RAW_CONFIG_CACHE.pop(str(config_path), None)
+        _LOAD_CONFIG_CACHE.pop(str(config_path), None)
+        _CONFIG_EXTENDED_PATHS.pop(str(config_path), None)
         _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
     from hermes_cli.observability.shared_metrics_disabled import record_config_saved
     record_config_saved(_raw_for_paths, current_normalized)
@@ -3184,6 +3330,10 @@ def show_config():
 
     _section("Paths")
     print(f"  Config:       {get_config_path()}")
+    if config.get("extends"):
+        ext = config["extends"]
+        ext_str = ", ".join(ext) if isinstance(ext, list) else str(ext)
+        print(f"  Extends:      {ext_str}")
     print(f"  Secrets:      {get_env_path()}")
     print(f"  Install:      {get_project_root()}")
 
