@@ -66,14 +66,14 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     with _config._CONFIG_LOCK:
         user_sig, cache_sig = _config._load_config_cache_sig(config_path)
         cached = _EFFECTIVE_CACHE.get(path_key)
-        if cached is not None and cache_sig is not None and cached[:8] == cache_sig:
+        if cached is not None and cache_sig is not None and len(cached) == 10 and cached[:8] == cache_sig:
             if all(_config._env_ref_lookup(k) == v for k, v in cached[9].items()):
                 return copy.deepcopy(cached[8])
 
         raw: Dict[str, Any] = {}
         recovered = False
         raw_hit = _config._RAW_CONFIG_CACHE.get(path_key)
-        if user_sig is not None and raw_hit is not None and raw_hit[:4] == user_sig:
+        if user_sig is not None and raw_hit is not None and raw_hit[:4] == user_sig and _config._raw_config_cache_hit(path_key, user_sig) is not None:
             raw = copy.deepcopy(raw_hit[4])  # one parse per process, shared with read_raw_config()
             _LAST_GOOD_USER_RAW.setdefault(path_key, copy.deepcopy(raw))
         elif user_sig is not None:
@@ -86,12 +86,22 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
                 raw, recovered = _recover_user_raw(config_path, path_key, exc), True
             else:
                 raw = loaded if isinstance(loaded, dict) else {}
-                _config._RAW_CONFIG_CACHE[path_key] = (*user_sig, copy.deepcopy(raw))
-                _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
+                try:
+                    raw, ext_paths = _config._resolve_config_extends(raw, config_path)
+                    _config._CONFIG_EXTENDED_PATHS[path_key] = ext_paths
+                except Exception as exc:
+                    if fail_closed:
+                        raise
+                    raw, recovered = _recover_user_raw(config_path, path_key, exc), True
+                if not recovered:
+                    ext_sigs = _config._get_extended_paths_sigs(path_key)
+                    _config._RAW_CONFIG_CACHE[path_key] = (*user_sig, copy.deepcopy(raw), ext_sigs)
+                    _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
+                    _, cache_sig = _config._load_config_cache_sig(config_path)
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
                 # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
                 # must not create backups/ inside that profile.
-                if config_path == _config.get_config_path():
+                if config_path == _config.get_config_path() and not recovered:
                     from hermes_cli.config_backups import backup_config
                     backup_config(config_path, "good")
 
