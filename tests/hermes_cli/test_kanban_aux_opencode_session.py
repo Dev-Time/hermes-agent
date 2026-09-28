@@ -51,13 +51,13 @@ def test_kanban_aux_call_supplies_stable_opencode_session(caller):
 
 def test_kanban_aux_call_does_not_add_session_for_other_providers():
     """The task binding must remain inert for non-OpenCode auxiliary routes."""
-    from agent.opencode_affinity import merge_opencode_session_headers
+    from agent.opencode_affinity import merge_session_affinity_headers
 
     seen = []
 
     def call_llm(**kwargs):
         from agent import auxiliary_client as aux
-        seen.append(merge_opencode_session_headers(
+        seen.append(merge_session_affinity_headers(
             {"extra_headers": {"x-existing": "keep"}}, "openai", None,
             aux._runtime_main_value("session_id"),
         ).get("extra_headers", {}))
