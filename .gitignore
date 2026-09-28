@@ -322,3 +322,7 @@ native/fts5_cjk/*.so
 /pm/.lock.json.lock
 
 apps/desktop/.dist-build*
+
+# Fork-specific: local tool state (GitNexus, Gemini CLI)
+.gitnexus
+.gemini
