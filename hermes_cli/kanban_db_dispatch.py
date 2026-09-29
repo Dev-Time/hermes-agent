@@ -1802,6 +1802,37 @@ def review_dispatch_enabled() -> bool:
         return True
 
 
+def _apply_review_lane_model(task: Task) -> None:
+    """Pin ``auxiliary.review``'s provider+model on a review-lane spawn.
+
+    In-memory only (like the sdlc-review skill injection): config changes must
+    reach re-runs, and a per-card ``model_override`` always wins. A review
+    worker needs BOTH provider and model — ``_worker_argv`` emits ``--provider``
+    only under ``model_override``, and model X without provider Y is the classic
+    board-stall; ``base_url``/``api_key``/``api_mode`` cannot ride the spawn at
+    all (no CLI flag), so a pin that carries only those is warned and skipped.
+    """
+    if task.model_override:
+        return
+    try:
+        from hermes_cli.config import auxiliary_review_cfg
+        cfg = auxiliary_review_cfg()
+    except Exception:
+        return
+    if not cfg:
+        return
+    if not (cfg["model"] and cfg["provider"]):
+        _kb._log.warning(
+            "kanban review lane: auxiliary.review pins provider=%r model=%r base_url=%r — a review "
+            "worker needs BOTH provider and model (base_url/api_key/api_mode cannot ride the worker "
+            "spawn), so it keeps the profile default model",
+            cfg["provider"], cfg["model"], cfg["base_url"],
+        )
+        return
+    task.model_override = cfg["model"]
+    task.provider_override = cfg["provider"]
+
+
 # Memory-aware dispatch guard: an uncapped board once OOM'd a 1 GiB host. Two
 # safeguards — a memory-DERIVED default cap when none is configured
 # (``resolve_max_in_progress``) and a live memory-PRESSURE guard inside the
@@ -2120,6 +2151,7 @@ def _dispatch_lane_task(
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
+        _apply_review_lane_model(claimed)
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:

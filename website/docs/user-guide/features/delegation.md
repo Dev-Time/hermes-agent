@@ -324,6 +324,8 @@ auxiliary:
 
 Credentials resolve exactly like a `delegation.provider` pin (full runtime-provider bundle: base_url, api key, api_mode). `provider: auto` with an empty `model` means "inherit the main agent's model" — the default.
 
+The same block also routes kanban **review-lane** workers: a card in `review` spawns with this `provider`+`model` (both required; a card's own `model_override` wins). `base_url`/`api_key`/`api_mode` apply to `/review` only — the worker spawn passes just `-m`/`--provider`.
+
 `/review` is deliberately separate from `/refine`: `/refine` reviews the conversation to update memory and skills, `/review` reviews the *work product* the conversation created.
 
 ## Inherited Tool Access
