@@ -684,6 +684,101 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
     assert captured == [["domain-specific-review", "sdlc-review"]]
 
 
+def _patch_review_dispatch_cfg(monkeypatch: pytest.MonkeyPatch, aux_review: dict) -> None:
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(
+        cfgmod, "load_config", lambda *args, **kwargs: {"kanban": {"review_dispatch": True}},
+    )
+    monkeypatch.setattr(
+        cfgmod, "load_config_readonly", lambda: {"auxiliary": {"review": aux_review}},
+    )
+
+
+def _dispatch_review_card(monkeypatch: pytest.MonkeyPatch, aux_review: dict, captured: list, **create_kwargs) -> str:
+    """One card through claim -> request_review -> dispatch; spawns land in ``captured``."""
+    _patch_review_dispatch_cfg(monkeypatch, aux_review)
+
+    def spawn(task, workspace):
+        captured.append(task)
+        return None
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="needs review", assignee="reviewer", **create_kwargs)
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn, task_id, summary="ready", expected_run_id=implementation.current_run_id,
+        )
+        result = kbd.dispatch_once(conn, spawn_fn=spawn)
+    assert task_id in [t[0] for t in result.spawned]
+    return task_id
+
+
+def test_review_lane_spawn_pins_auxiliary_review_model(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_review_dispatch_cfg(
+        monkeypatch, {"provider": "custom:qa", "model": "qa/review-x"},
+    )
+    captured: list = []
+
+    def spawn(task, workspace):
+        captured.append(task)
+        return None
+
+    with kbc.connect() as conn:
+        ready_id = kb.create_task(conn, title="plain work", assignee="worker")
+        review_id = kb.create_task(conn, title="needs review", assignee="reviewer")
+        implementation = kb.claim_task(conn, review_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn, review_id, summary="ready", expected_run_id=implementation.current_run_id,
+        )
+        result = kbd.dispatch_once(conn, spawn_fn=spawn)
+
+    spawned = {task.id: task for task in captured}
+    assert {t[0] for t in result.spawned} == {ready_id, review_id}
+    review_task = spawned[review_id]
+    assert review_task.model_override == "qa/review-x"
+    assert review_task.provider_override == "custom:qa"
+    argv = kbd._worker_argv(review_task, "reviewer", None)
+    assert argv[argv.index("qa/review-x") - 1] == "-m"
+    assert argv[argv.index("custom:qa") - 1] == "--provider"
+    # The ready lane never routes through auxiliary.review.
+    assert spawned[ready_id].model_override is None
+    assert spawned[ready_id].provider_override is None
+
+
+def test_review_lane_keeps_explicit_task_model_override(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list = []
+    task_id = _dispatch_review_card(
+        monkeypatch, {"provider": "custom:qa", "model": "qa/review-x"},
+        captured, model_override="explicit/model",
+    )
+    task = next(t for t in captured if t.id == task_id)
+    assert task.model_override == "explicit/model"
+    assert task.provider_override is None
+
+
+def test_review_lane_skips_model_without_provider(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # provider "auto" normalizes to empty: a bare -m with no --provider is the
+    # classic board-stall, so the card must keep the profile default model.
+    captured: list = []
+    task_id = _dispatch_review_card(
+        monkeypatch, {"provider": "auto", "model": "qa/review-x"}, captured,
+    )
+    task = next(t for t in captured if t.id == task_id)
+    assert task.model_override is None
+    assert task.provider_override is None
+
+
 def test_review_dispatch_honors_global_and_per_profile_caps(
     kanban_home: Path,
     monkeypatch: pytest.MonkeyPatch,
