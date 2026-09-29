@@ -2254,6 +2254,25 @@ def load_config_readonly() -> Dict[str, Any]:
     return _load_config_impl(want_deepcopy=False)
 
 
+def auxiliary_review_cfg() -> Optional[Dict[str, str]]:
+    """``auxiliary.review`` as stripped strings (provider ``auto`` normalized to ``""``), or
+    ``None`` when unconfigured (provider auto/empty and no model/base_url) so the reviewer
+    inherits the main agent's credentials. Shared by chat ``/review`` and the kanban
+    review-lane spawn."""
+    try:
+        review = (load_config_readonly().get("auxiliary") or {}).get("review")
+    except Exception:
+        return None
+    if not isinstance(review, dict):
+        return None
+    cfg = {k: str(review.get(k) or "").strip() for k in ("provider", "model", "base_url", "api_key", "api_mode")}
+    if cfg["provider"].lower() == "auto":
+        cfg["provider"] = ""
+    if not (cfg["provider"] or cfg["model"] or cfg["base_url"]):
+        return None
+    return cfg
+
+
 def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Return ``parent[key]`` as a dict, replacing a missing or non-dict value with ``{}``."""
     child = parent.get(key)
