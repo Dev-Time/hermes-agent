@@ -140,19 +140,10 @@ def _load_review_credentials_cfg() -> Optional[dict[str, Any]]:
     """``auxiliary.review`` as a delegation-credentials dict, or None when unconfigured (provider auto/empty
     and no model/base_url) so the reviewer inherits the parent's credentials."""
     try:
-        from hermes_cli.config import load_config_readonly
-        review = (load_config_readonly().get("auxiliary") or {}).get("review") or {}
+        from hermes_cli.config import auxiliary_review_cfg
+        return auxiliary_review_cfg()
     except Exception:
         return None
-    if not isinstance(review, dict):
-        return None
-
-    cfg = {k: str(review.get(k) or "").strip() for k in ("provider", "model", "base_url", "api_key", "api_mode")}
-    if cfg["provider"].lower() == "auto":
-        cfg["provider"] = ""
-    if not (cfg["provider"] or cfg["model"] or cfg["base_url"]):
-        return None
-    return cfg
 
 
 def start_review(parent_agent, messages: list[dict[str, Any]], user_prompt: str = "") -> dict[str, Any]:
