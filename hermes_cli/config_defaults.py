@@ -770,6 +770,8 @@ DEFAULT_CONFIG = {
         # /review reviewer: a full subagent on the async delegation rail, credentials resolved like
         # delegation.provider pins. "auto" + "" = main agent's model. api_mode forces transport:
         # chat_completions | anthropic_messages | codex_responses.
+        # Also pins kanban review-lane workers (provider+model only, and only when the card has no
+        # model_override); base_url/api_key/api_mode cannot ride the worker spawn.
         "review": {"provider": "auto", "model": "", "base_url": "", "api_key": "", "api_mode": ""},
         "mcp": _aux(30),
         # prefer_fast_model opts in to the provider fast tier; auto otherwise = main model.
@@ -1892,6 +1894,8 @@ DEFAULT_CONFIG = {
         "dispatch_in_gateway": True,
         # Auto-claim tasks in the review column and spawn the assigned profile with the bundled
         # sdlc-review skill. Disable where every review is done manually from the dashboard.
+        # Review-lane workers run with auxiliary.review's provider+model when the card has no
+        # model_override.
         "review_dispatch": True,
         # Seconds between dispatcher ticks. Lower = snappier pickup; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
