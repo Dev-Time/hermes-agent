@@ -175,10 +175,14 @@ def _background_delete_gate(store, action, operations, target="memory", content=
     single or inside a batch — are never applied unattended. The op is staged in the pending
     store instead of merely denied: the fork's own review summary is never published back, so
     a plain denial would drop the consolidation request with no surfacing path at all. A
-    staging failure fails closed to a plain denial."""
+    staging failure fails closed to a plain denial. ``memory.background_write_mode: "apply"``
+    skips the staging and lets the fork commit the write itself."""
     from tools.skill_provenance import is_unattended_review
 
     if not is_unattended_review():
+        return None
+    # memory.background_write_mode: "apply" lets the fork commit replace/remove itself.
+    if str(get_builtin_memory_config().get("background_write_mode", "stage")).strip().lower() == "apply":
         return None
     payload = ({"action": "batch", "target": target, "operations": operations}
                if operations is not None else

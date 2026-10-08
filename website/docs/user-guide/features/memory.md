@@ -316,13 +316,31 @@ This is the answer to "the agent saved a wrong assumption about me": set
 `write_approval: true`, and every save — especially the unprompted background
 ones — waits for your yes/no before it ever enters your profile.
 
-A staged `replace` or `remove` (the background review stages these even with the
-gate off) records the full entry it targets, and `/memory pending` shows it.
+A staged `replace` or `remove` (the background review stages these by default,
+even with the gate off) records the full entry it targets, and `/memory pending` shows it.
 Approval applies to exactly that entry: if it changed after the write was staged,
 the write is refused and stays pending for you to reject. A `replace`/`remove`
 staged before this pinning existed has no verifiable target and is refused too:
 reject it and recreate the change. `/memory approve` lists the full text of
 every entry it overwrote or removed.
+
+## Background review deletes (`memory.background_write_mode`)
+
+The background review may always `add` a memory unattended. Its `replace` and
+`remove` writes — the consolidation half, where a stale entry is rewritten or
+dropped — have their own switch, independent of `write_approval`:
+
+```yaml
+memory:
+  background_write_mode: stage   # stage (default) | apply
+```
+
+| Value | Behaviour |
+|-------|-----------|
+| `stage` (default) | Every unattended `replace`/`remove` is staged for `/memory pending`, even when `write_approval: false`. Nothing is deleted without you. |
+| `apply` | The review commits `replace`/`remove` itself. Nothing lands in `/memory pending`, so there is no queue to clear. |
+
+Switch it with `hermes config set memory.background_write_mode apply`.
 
 ## Background review notifications (`display.memory_notifications`)
 
