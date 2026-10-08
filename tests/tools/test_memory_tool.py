@@ -996,6 +996,25 @@ class TestBackgroundReviewDeleteGate:
         assert result["success"] is True
         assert "entry a supervised turn may remove" not in store._entries_for("memory")
 
+    def test_apply_mode_commits_unattended_replace(self, store, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as cfg
+        c = cfg.load_config()
+        c.setdefault("memory", {})["background_write_mode"] = "apply"
+        cfg.save_config(c)
+        store.add("memory", "entry the fork may rewrite")
+        token = set_current_write_origin("background_review")
+        try:
+            result = json.loads(memory_tool(
+                action="replace", old_text="entry the fork", content="rewritten by fork", store=store))
+        finally:
+            reset_current_write_origin(token)
+        assert result["success"] is True
+        assert "staged" not in result
+        assert "rewritten by fork" in store._entries_for("memory")
+        from tools.write_approval import MEMORY, list_pending
+        assert list_pending(MEMORY) == []
+
     def test_attended_review_keeps_full_operation_set(self, store):
         # A user-requested /refine fork keeps the background_review origin (skill guards still
         # apply) but is attended, so replace/remove keep working on that supervised surface.
