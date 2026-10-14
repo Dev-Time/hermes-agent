@@ -13,8 +13,8 @@ from hermes_cli.config import (
     save_config,
     set_config_value,
     unset_config_value,
-    show_config,
 )
+from hermes_cli.config_show import show_config
 from hermes_cli.config_effective import load_user_config_effective
 from hermes_cli.profiles import create_profile
 
