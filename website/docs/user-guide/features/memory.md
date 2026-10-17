@@ -291,7 +291,16 @@ memory:
   user_char_limit: 1375     # ~500 tokens
   write_approval: false     # false = write freely (default) | true = require approval
   prefetch_spill_enabled: false  # external recall stays intact unless explicitly enabled
+  external_prefetch_timeout: 8.0  # seconds a turn waits on an external provider's prefetch()
 ```
+
+`memory.external_prefetch_timeout` bounds how long a turn waits for an **external**
+provider's `prefetch()` before skipping that provider for the turn (the stuck call keeps
+running and is skipped on later turns until it returns). Built-in memory is never bounded
+by it. The budget is snapshot at provider registration, so a config edit takes effect on
+the next session; values must be above 0 and at or below 30 s — the ceiling of the
+provider HTTP call — and anything outside that range is logged and replaced with the 8 s
+default.
 
 Setting **both** `memory_enabled` and `user_profile_enabled` to `false` turns the
 built-in stores off completely: the `memory` tool is dropped from the schema and
