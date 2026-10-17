@@ -494,6 +494,76 @@ class TestMemoryManager:
         assert external.prefetch_queries == ["query", "query 3"]
         assert external.name not in mgr._external_prefetch_threads
 
+    @staticmethod
+    def _set_prefetch_timeout_config(tmp_path, value):
+        from hermes_cli.config import atomic_config_write
+
+        atomic_config_write(tmp_path / "config.yaml", {
+            "memory": {"external_prefetch_timeout": value},
+        })
+
+    def test_config_external_prefetch_timeout_bounds_stuck_prefetch(
+        self, tmp_path, monkeypatch,
+    ):
+        """memory.external_prefetch_timeout from config.yaml bounds the turn's wait on a
+        stuck external prefetch; the stuck provider's late result never lands."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._set_prefetch_timeout_config(tmp_path, 0.05)
+        mgr = MemoryManager()
+        builtin = FakeMemoryProvider("builtin")
+        builtin._prefetch_result = "builtin memory"
+        external = BlockingPrefetchProvider("external")
+        external._prefetch_result = "late external memory"
+        mgr.add_provider(builtin)
+        mgr.add_provider(external)
+
+        started = time.monotonic()
+        result = mgr.prefetch_all("query")
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5
+        assert result == "builtin memory"
+        assert external.started.wait(timeout=1.0)
+
+        external.release.set()
+
+    def test_explicit_ctor_timeout_wins_over_config(self, tmp_path, monkeypatch):
+        """An explicit external_prefetch_timeout= kwarg outranks config.yaml."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._set_prefetch_timeout_config(tmp_path, 30.0)
+        mgr = MemoryManager(external_prefetch_timeout=0.01)
+        builtin = FakeMemoryProvider("builtin")
+        builtin._prefetch_result = "builtin memory"
+        external = BlockingPrefetchProvider("external")
+        external._prefetch_result = "late external memory"
+        mgr.add_provider(builtin)
+        mgr.add_provider(external)
+
+        started = time.monotonic()
+        result = mgr.prefetch_all("query")
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5
+        assert result == "builtin memory"
+        assert external.started.wait(timeout=1.0)
+
+        external.release.set()
+
+    @pytest.mark.parametrize("value", [0, -1, 45.0, "abc", None, float("nan"), True, False])
+    def test_invalid_config_external_prefetch_timeout_falls_back(
+        self, tmp_path, monkeypatch, value,
+    ):
+        """Out-of-range, non-numeric or boolean config values fall back to the default budget
+        (never raise out of registration): <= 0, > the plugin's 30 s HTTP ceiling, NaN, bool."""
+        from agent.memory_manager import _EXTERNAL_PREFETCH_TIMEOUT_S
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._set_prefetch_timeout_config(tmp_path, value)
+        mgr = MemoryManager()
+        mgr.add_provider(FakeMemoryProvider("external"))
+
+        assert mgr._external_prefetch_timeout == _EXTERNAL_PREFETCH_TIMEOUT_S
+
 
 class TestPluginMemoryDiscovery:
     """Memory providers are discovered from plugins/memory/ directory."""

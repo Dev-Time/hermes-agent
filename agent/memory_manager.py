@@ -36,6 +36,9 @@ _LEGACY_PRE_COMPRESS_API_VERSION = 1
 # blocks interpreter exit.
 _SYNC_DRAIN_TIMEOUT_S = 5.0
 _EXTERNAL_PREFETCH_TIMEOUT_S = 8.0
+_EXTERNAL_PREFETCH_TIMEOUT_MAX_S = 30.0
+# Upper bound for a config-supplied prefetch budget. The wait happens synchronously in the turn
+# prologue, so a larger budget costs that much added latency on every turn: refused, not honoured.
 
 
 # -- Signature introspection (providers are duck-typed; call shapes vary) -----
@@ -219,6 +222,23 @@ def _redact_messages_for_egress(messages: Optional[list[Any]]) -> Optional[list[
     return None if messages is None else list(_redact_for_provider(messages))
 
 
+def _resolve_external_prefetch_timeout(value: Any) -> float:
+    """Config-sourced prefetch budget: positive, finite, <= the plugin HTTP ceiling.
+    Anything else — including a bool, which ``float()`` would silently accept — warns and falls
+    back to the default; never raises, because registration must not fail."""
+    try:
+        resolved = float("nan") if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError):
+        resolved = float("nan")
+    if 0.0 < resolved <= _EXTERNAL_PREFETCH_TIMEOUT_MAX_S:
+        return resolved
+    logger.warning(
+        "memory.external_prefetch_timeout %r is outside (0, %.1f]; using the %.1fs default",
+        value, _EXTERNAL_PREFETCH_TIMEOUT_MAX_S, _EXTERNAL_PREFETCH_TIMEOUT_S,
+    )
+    return _EXTERNAL_PREFETCH_TIMEOUT_S
+
+
 class MemoryManager:
     """Builtin provider (always first) plus at most one external provider.
 
@@ -231,6 +251,8 @@ class MemoryManager:
         self._tool_to_provider: dict[str, MemoryProvider] = {}
         self._external_prefetch_spill_config: Optional[dict[str, Any]] = None
         self._has_external: bool = False
+        # An explicit kwarg outranks memory.external_prefetch_timeout from config (add_provider).
+        self._external_prefetch_timeout_explicit = external_prefetch_timeout is not None
         timeout = external_prefetch_timeout
         timeout = _EXTERNAL_PREFETCH_TIMEOUT_S if timeout is None else float(timeout)
         if timeout <= 0:
@@ -308,6 +330,12 @@ class MemoryManager:
             # Recall is provider-ranked: keep it whole unless this profile opts in.
             # Snapshot both gates at registration, never re-read them mid-conversation.
             memory = load_config().get("memory", {})
+            # The prefetch budget is a registration snapshot for the same reason: an
+            # explicit ctor kwarg outranks config, and config edits land next session.
+            if not self._external_prefetch_timeout_explicit and isinstance(memory, dict):
+                configured = memory.get("external_prefetch_timeout")
+                if configured is not None:
+                    self._external_prefetch_timeout = _resolve_external_prefetch_timeout(configured)
             spill_config = get_spill_config()
             if not (isinstance(memory, dict) and memory.get("prefetch_spill_enabled", False) is True):
                 # Off by default, but keep a ceiling so a runaway provider can't overflow the context.
