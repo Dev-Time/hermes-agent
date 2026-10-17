@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- new registered config key memory.external_prefetch_timeout: 3 data-only lines (1 key + 2 comment lines) in the DEFAULT_CONFIG dict; the function-move remedy cannot apply to this pure-data leaf module, and hermes_cli/AGENTS.md requires every config.yaml option to live here
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
@@ -1325,6 +1326,9 @@ DEFAULT_CONFIG = {
         # One external provider: bundled (retaindb, byterover) or catalog-installed (honcho,
         # hindsight, supermemory, mem0, openviking, holographic). Empty = built-in only.
         "provider": "",
+        # Seconds a turn waits on an external provider's prefetch(). Must stay under the
+        # plugin HTTP ceiling (30 s); invalid values fall back to 8.0 at registration.
+        "external_prefetch_timeout": 8.0,
     },
     # Subagent delegation: `backend` = task-routing strategy ("default": keys below), `backends.<name>` = its settings.
     "delegation": {
