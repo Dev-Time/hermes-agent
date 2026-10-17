@@ -206,6 +206,18 @@ with the configured head/tail preview plus its path. The default preview keeps
 only the first and last `500` characters; the model must read the file to recover
 the middle. Results at or below the threshold remain unchanged.
 
+### Bounded prefetch latency
+
+`prefetch()` runs synchronously in the turn prologue, so an external provider's call is
+bounded by `memory.external_prefetch_timeout` (default `8.0` s; valid range above 0 and at
+or below the 30 s provider HTTP ceiling, out-of-range values fall back to the default with
+a warning). Over budget, that provider is skipped for the turn — its late result is
+discarded — and skipped on later turns until the stuck call returns. The budget is
+snapshotted when the provider is registered, so a config change applies from the next
+session. A provider that reliably needs more than the default must either be faster or
+document a raised `memory.external_prefetch_timeout` for its users; built-in memory is
+never bounded by this budget.
+
 The shared `hooks.output_spill` preview lengths and directory still apply, and
 `hooks.output_spill.enabled: false` disables spilling even with memory opt-in.
 Both settings are snapshotted when the external provider is registered; restart
