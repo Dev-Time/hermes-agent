@@ -11,6 +11,22 @@ import sqlite3
 from persistence.core.errors import AuthorityRefusal
 
 
+def _review_lane_pins(config) -> dict:
+    """``auxiliary.review`` provider+model for a kanban review run, or ``{}``.
+
+    A review worker needs BOTH: model X on the main provider is the classic board-stall, and
+    ``base_url``/``api_key`` ride the policy, not the launch. A per-card override always wins.
+    """
+    review = (config or {}).get('auxiliary', {}).get('review')
+    if not isinstance(review, dict):
+        return {}
+    provider = str(review.get('provider') or '').strip()
+    model = str(review.get('model') or '').strip()
+    if provider.lower() == 'auto':
+        provider = ''
+    return {'model': model, 'provider': provider} if model and provider else {}
+
+
 def build_kanban_policy(connection, params, config):
     from hermes_cli import kanban_db as kb
     from hermes_cli.profiles import resolve_profile_env
@@ -42,14 +58,15 @@ def build_kanban_policy(connection, params, config):
                 raise AuthorityRefusal('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
             skills = list(task.skills or ())
-            if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
+            review_lane = kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review'
+            if review_lane:
                 # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
                 skills = list(dict.fromkeys([*skills, 'sdlc-review']))
     except (ValueError, OSError, sqlite3.Error) as exc:
         raise AuthorityRefusal('invalid_kanban_claim') from exc
     cwd = task.workspace_path
     private = {}
-    policy = kanban_launch_policy(task, cwd, config, private)
+    policy = kanban_launch_policy(task, cwd, config, private, review=review_lane)
     context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
@@ -62,7 +79,7 @@ def build_kanban_policy(connection, params, config):
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
 
 
-def kanban_launch_policy(task, cwd, config, private=None):
+def kanban_launch_policy(task, cwd, config, private=None, review=False):
     """The launch policy a claimed card runs, its model resolved by ``task_model`` (shared with the
     dispatcher's pre-spawn refusal). Refuses ``invalid_params`` (field ``model``) only when nothing
     can name one, before a receipt or a worker exists."""
@@ -72,6 +89,8 @@ def kanban_launch_policy(task, cwd, config, private=None):
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params[name] = value
+    if review and not task.model_override:
+        params.update(_review_lane_pins(config))
     policy = build_policy(params, config, private_secrets={} if private is None else private)
     if policy.model is None:
         model, unresolved = task_model(task, config)
