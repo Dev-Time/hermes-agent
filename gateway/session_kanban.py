@@ -11,6 +11,22 @@ import sqlite3
 from hermes_state_runtime import RuntimeStoreError
 
 
+def _review_lane_pins(config) -> dict:
+    """``auxiliary.review`` provider+model for a kanban review run, or ``{}``.
+
+    A review worker needs BOTH: model X on the main provider is the classic board-stall, and
+    ``base_url``/``api_key`` ride the policy, not the launch. A per-card override always wins.
+    """
+    review = (config or {}).get('auxiliary', {}).get('review')
+    if not isinstance(review, dict):
+        return {}
+    provider = str(review.get('provider') or '').strip()
+    model = str(review.get('model') or '').strip()
+    if provider.lower() == 'auto':
+        provider = ''
+    return {'model': model, 'provider': provider} if model and provider else {}
+
+
 def build_kanban_policy(connection, params, config):
     from hermes_cli import kanban_db as kb
     from hermes_cli.profiles import resolve_profile_env
@@ -43,7 +59,8 @@ def build_kanban_policy(connection, params, config):
                 raise RuntimeStoreError('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
             skills = list(task.skills or ())
-            if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
+            review_lane = kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review'
+            if review_lane:
                 # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
                 skills = list(dict.fromkeys([*skills, 'sdlc-review']))
     except (ValueError, OSError, sqlite3.Error) as exc:
@@ -53,6 +70,8 @@ def build_kanban_policy(connection, params, config):
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params_policy[name] = value
+    if review_lane and not task.model_override:
+        params_policy.update(_review_lane_pins(config))
     private = {}
     policy = build_policy(params_policy, config, private_secrets=private)
     if policy.model is None:

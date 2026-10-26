@@ -146,3 +146,77 @@ def test_claim_reclaimed_before_admission_marker_is_refused(tmp_path, monkeypatc
     assert calls == []
     with closing(connect(board='owned')) as conn:
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='owner_admitted'", (task_id,)).fetchone()[0] == 0
+
+
+def _review_claim(tmp_path, monkeypatch, *, board='owned', model_override=None, provider_override=None, review=True):
+    """A claimed card whose current run is (or is not) a review-lane run."""
+    from contextlib import closing
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
+    monkeypatch.delenv('HERMES_DELEGATED_CHILD', raising=False)
+    monkeypatch.setattr('hermes_cli.profiles.resolve_profile_env', lambda name: str(tmp_path))
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(exist_ok=True)
+    (workspace / 'pyproject.toml').write_text('[project]\nname = "task"\n')
+    kb.create_board(board)
+    with closing(connect(board=board)) as conn:
+        tid = kb.create_task(conn, title='needs review', assignee='default', workspace_kind='dir',
+                             workspace_path=str(workspace), model_override=model_override,
+                             provider_override=provider_override)
+        first = kb.claim_task(conn, tid)
+        assert first is not None
+        if review:
+            assert kb.request_review(conn, tid, summary='ready', expected_run_id=first.current_run_id)
+            task = kb.claim_review_task(conn, tid)
+            assert task is not None
+        else:
+            task = first
+    return task
+
+
+def _policy_for(tmp_path, task, config):
+    from types import SimpleNamespace
+    from gateway.session_contract import Principal
+    from gateway.session_kanban import build_kanban_policy
+    actor = Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
+    connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
+    params = dict(board='owned', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
+    policy, _secrets = build_kanban_policy(connection, params, config)
+    return policy
+
+
+AUTO_REVIEW_CONFIG = {'model': {'default': 'loop-model', 'provider': 'custom'},
+                      'auxiliary': {'review': {'provider': 'custom:qa', 'model': 'qa/review-x'}}}
+
+
+def test_review_lane_policy_pins_auxiliary_review_model(tmp_path, monkeypatch):
+    """The owner reads the claimed card: a review run runs on auxiliary.review."""
+    task = _review_claim(tmp_path, monkeypatch)
+    policy = _policy_for(tmp_path, task, AUTO_REVIEW_CONFIG)
+    assert (policy.model, policy.provider) == ('qa/review-x', 'custom:qa')
+
+
+def test_review_lane_policy_keeps_the_card_model_override(tmp_path, monkeypatch):
+    task = _review_claim(tmp_path, monkeypatch, model_override='explicit/model')
+    policy = _policy_for(tmp_path, task, AUTO_REVIEW_CONFIG)
+    assert policy.model == 'explicit/model'
+
+
+def test_review_lane_policy_skips_model_without_provider(tmp_path, monkeypatch):
+    """provider "auto" normalizes to empty: model X on the main provider is the
+    classic board-stall, so the card keeps the owner's default model."""
+    config = {'model': {'default': 'loop-model', 'provider': 'custom'},
+              'auxiliary': {'review': {'provider': 'auto', 'model': 'qa/review-x'}}}
+    task = _review_claim(tmp_path, monkeypatch)
+    policy = _policy_for(tmp_path, task, config)
+    assert (policy.model, policy.provider) == ('loop-model', 'custom')
+
+
+def test_implementation_lane_policy_ignores_auxiliary_review(tmp_path, monkeypatch):
+    task = _review_claim(tmp_path, monkeypatch, review=False)
+    policy = _policy_for(tmp_path, task, AUTO_REVIEW_CONFIG)
+    assert (policy.model, policy.provider) == ('loop-model', 'custom')
